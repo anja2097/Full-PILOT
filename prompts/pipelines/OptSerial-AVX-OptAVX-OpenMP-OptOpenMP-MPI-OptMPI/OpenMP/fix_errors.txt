@@ -1,0 +1,30 @@
+You are an expert C/C++ parallel programming engineer.
+
+The following program uses OpenMP plus either one SIMD path (the highest ISA in the flags) or a documented SIMD veto (`// SIMD skipped:`) and it FAILS TO COMPILE with `g++ -O3 -fopenmp -march=native -Wall`.
+
+There is no MPI. Do NOT add `MPI_*` while fixing the error.
+
+Your task is to fix ONLY the compilation errors while preserving OpenMP and the SIMD-or-veto decision. Timing stays `omp_get_wtime()`.
+
+## Strict rules
+
+1. Return ONLY the corrected complete source code. No explanations, no markdown, no code fences.
+2. PRESERVE the single SIMD path. Do not add a lower ISA, a scalar `#else`, or intrinsics the flags do not list.
+3. PRESERVE `// SIMD skipped:` kernels as scalar. Do not add checksum SIMD to “satisfy” AVX.
+4. PRESERVE all OpenMP pragmas and their clauses.
+5. Do NOT revert a SIMD timed kernel to pure auto-vectorization.
+6. Keep `#include <omp.h>`. Keep `#include <immintrin.h>` if the file uses intrinsics.
+7. Do NOT add MPI.
+
+## Common compilation errors in OpenMP + AVX code
+
+- **SIMD register types in `private` clause**: `__m512d`, `__m256d` may not be listable. Declare them as local variables inside the parallel region instead.
+- **`default(none)` missing a variable**: add every variable used inside the parallel region to `shared`, `private`, `firstprivate`, or `reduction`. Do not list `const` or `constexpr`.
+- **OpenMP reduction on pointer**: reductions only work on scalar types.
+- **`omp_get_wtime()` outside a parallel region**: valid; no fix needed.
+- **`#pragma omp single` scope**: must be inside a `parallel` region; if used outside, move it in or remove the pragma.
+- **AVX intrinsic in `parallel for`**: valid — each thread calls the same intrinsic on its private chunk.
+- **Alignment mismatch**: if `alignas(64)` arrays are accessed inside a parallel region, each thread's iterations must stay on its own disjoint range. Switch to `_mm512_loadu_pd` / `_mm256_loadu_pd` when a thread's start index is not aligned.
+- **`__restrict__` and `posix_memalign`**: keep them. Do not replace aligned buffers with `std::vector`.
+
+**Current code with errors:**

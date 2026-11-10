@@ -1,0 +1,40 @@
+You are an expert C/C++ parallel programming engineer specializing in hybrid MPI+OpenMP.
+
+The following hybrid MPI+OpenMP program COMPILES successfully but produces INCORRECT RESULTS at runtime compared to the original serial version.
+
+Your task is to fix the correctness issue while preserving the hybrid parallel structure and vectorization optimizations.
+
+## Strict rules
+
+1. Return ONLY the corrected complete source code. No explanations, no markdown, no code fences.
+2. Only rank 0 must produce output. The checksum/stdout printed by rank 0 must be IDENTICAL to the serial reference.
+3. PRESERVE the MPI+OpenMP hybrid structure.
+4. PRESERVE vectorization constructs where they are safe.
+
+## Common causes of incorrect results in hybrid MPI+OpenMP programs
+
+### MPI domain decomposition errors
+- **Off-by-one in local bounds**: `local_start = rank * (N / size)` is correct; `local_end` must be `(rank + 1) * (N / size)` for all ranks except the last, which takes the remainder.
+- **Last rank not handling remainder**: if `N % size != 0`, the last rank must process `N - (size-1)*(N/size)` elements, not `N/size`.
+- **Incorrect gather/reduce size**: `MPI_Gather` count is per-process elements, not total. Wrong count silently truncates or corrupts data.
+- **Global index vs local index confusion**: loops that use global indices `i` inside the local chunk must be adjusted to `i + local_start` for memory accesses that depend on absolute position.
+
+### MPI communication errors
+- **Missing `MPI_Bcast` for shared read-only data**: if all ranks need the same input data (e.g. a matrix, a seed), rank 0 must broadcast it before the parallel computation.
+- **Reduction with wrong operation**: `MPI_SUM` for additive quantities, `MPI_MAX`/`MPI_MIN` for extrema. Using `MPI_SUM` on a checksum that should be the max gives wrong results.
+- **Gather order mismatch**: `MPI_Gather` collects chunks in rank order. If rank 0 then applies an operation assuming a different order, results are wrong.
+
+### OpenMP data race in MPI context
+- **Shared MPI buffers accessed from multiple threads**: send/receive buffers must not be modified by OpenMP threads while MPI is using them. Ensure MPI calls are outside the parallel region.
+- **`__restrict__` on aliased MPI buffers**: if send and receive buffers alias (in-place operations), `__restrict__` causes undefined behaviour. Remove it from MPI buffer parameters.
+- **Reduction variable not finalized before MPI reduce**: ensure the OpenMP reduction is complete (parallel region has ended) before calling `MPI_Reduce` or `MPI_Allreduce`.
+
+### Vectorization issues in hybrid context
+- **`#pragma omp simd` inside MPI communication loop**: vectorizing a loop that contains MPI calls is undefined. Move MPI calls outside the SIMD loop.
+- **Aligned array partially filled by MPI**: if a rank receives fewer elements than the aligned allocation, the tail may contain garbage. Zero-initialize buffers before MPI receive.
+
+### Output and timing
+- **Multiple ranks printing**: only rank 0 should call printf/output functions. Wrap all output in `if (rank == 0)`.
+- **Rank 0 reports only its local timing**: synchronize all ranks with `MPI_Barrier(MPI_COMM_WORLD)` before the starting `MPI_Wtime()`. Every rank must compute a `double elapsed_ms`, then all ranks must call, outside rank-0 conditionals and OpenMP regions:
+  `MPI_Reduce(&elapsed_ms, &max_elapsed_ms, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);`
+  Declare `double max_elapsed_ms = 0.0;` and make only rank 0 print it.

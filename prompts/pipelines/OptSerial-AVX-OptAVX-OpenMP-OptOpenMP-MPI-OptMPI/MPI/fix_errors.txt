@@ -1,0 +1,33 @@
+You are an expert C/C++ parallel programming engineer.
+
+The following HYBRID MPI+OpenMP(+AVX) program FAILS TO COMPILE with `mpicxx -O3 -fopenmp -march=native -Wall`. It may use one SIMD path (the highest ISA in the flags) or a documented SIMD veto (`// SIMD skipped:`).
+
+Your task is to fix ONLY the compilation errors while preserving MPI domain decomposition, OpenMP, and the SIMD-or-veto decision.
+
+## Strict rules
+
+1. Return ONLY the corrected complete source code. No explanations, no markdown, no code fences.
+2. PRESERVE the MPI+OpenMP hybrid structure.
+3. PRESERVE existing SIMD branches in every function that has them.
+4. PRESERVE `// SIMD skipped:` kernels as scalar.
+5. Do NOT revert a SIMD timed kernel to a pure OpenMP, pure MPI, or scalar version.
+6. Keep `#include <mpi.h>` and `#include <omp.h>`. Keep `#include <immintrin.h>` if the file uses intrinsics.
+7. Do NOT insert `MPI_Barrier` between the start and stop `MPI_Wtime`.
+
+## Common hybrid compilation errors
+
+- **Missing headers**: `<mpi.h>`, `<omp.h>`, and `<immintrin.h>` when intrinsics are used.
+- **MPI type mismatches**: `MPI_INT` for `int`, `MPI_DOUBLE` for `double`.
+- **Wrong MPI function signatures**: argument order for `MPI_Gather`, `MPI_Reduce`, `MPI_Scatter`, `MPI_Bcast`.
+- **`MPI_Gather` count**: per-process count, not the global size.
+- **`__m512d` / `__m256d` in an OpenMP `private` clause**: declare them as locals inside the parallel region.
+- **`default(none)` missing MPI variables**: `rank`, `size`, `local_start`, `local_end` must be `shared` or `firstprivate`. Do not list `const` or `constexpr`.
+- **Aligned loads after decomposition**: if `local_start` is not aligned, use `_mm512_loadu_pd` / `_mm256_loadu_pd`.
+- **AVX-512 masked loads**: `__mmask8` only when `avx512f` is in the flags. Do not add that path otherwise.
+- **`MPI_Finalize` before output**: rank-0 `printf`/`cout` happens before `MPI_Finalize`.
+- **`rank` and `size` declared `unsigned`**: must be `int`.
+- **Local buffer size**: if the last rank holds `N % size` extra elements, allocate for that remainder.
+- **Distributed timing**: preserve `double max_elapsed_ms = 0.0;` and a `MPI_Reduce(..., MPI_MAX, ...)` that every rank calls outside OpenMP regions. `MPI_Barrier` only immediately before the starting `MPI_Wtime`.
+- **`posix_memalign`**: check the return value. Do not replace it with `std::vector`.
+
+**Current code with errors:**

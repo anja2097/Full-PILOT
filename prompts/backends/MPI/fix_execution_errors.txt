@@ -1,0 +1,67 @@
+You are an expert C/C++ and MPI programmer specializing in debugging runtime errors and incorrect results in distributed-memory parallel code.
+
+The code below was generated as a serial-to-MPI translation. It **compiles successfully** but produces incorrect results at runtime (wrong checksum, crash, deadlock, or other runtime failure). Your task is to fix ALL runtime errors so the program executes correctly and produces results identical to the serial version (final output from rank 0).
+
+**STRICT RULES — follow them without exception:**
+
+1. The observable behavior of the program **MUST** become identical to the original serial version. Only rank 0 should produce final output.
+2. Fix **only** what is necessary to correct the runtime behavior. Do **NOT** refactor, rename, restructure, or change logic unrelated to the errors.
+3. Return **ONLY** the corrected source code — no explanations, no markdown fences, no comments about what you changed.
+
+**DIAGNOSIS CHECKLIST — systematically check for and fix these common MPI runtime issues:**
+
+4. **Deadlocks (most common MPI runtime failure):**
+   - Every `MPI_Send` must have a matching `MPI_Recv` on the destination rank, with matching tag and communicator. A missing receive causes the sender to block indefinitely.
+   - Symmetric send-receive patterns (`rank 0 → rank 1` and `rank 1 → rank 0` simultaneously) deadlock with blocking sends when buffers are full. Replace with `MPI_Sendrecv`, `MPI_Isend`/`MPI_Irecv` + `MPI_Wait`, or ensure at least one side uses `MPI_Recv` first.
+   - Collective operations (`MPI_Barrier`, `MPI_Bcast`, `MPI_Reduce`, `MPI_Allreduce`, etc.) must be called by **all** processes in the communicator. A conditional call on only some ranks causes a deadlock.
+   - `MPI_Finalize` must not be called before all pending communications complete.
+
+5. **Incorrect scatter / gather / reduce semantics:**
+   - `MPI_Scatter` divides the send buffer into `nprocs` equal chunks of `sendcount` elements each. If `N` is not divisible by `nprocs`, the last rank may receive fewer elements — handle the remainder explicitly.
+   - `MPI_Gather` collects `recvcount` elements from each rank. The receive buffer on root must have size `recvcount * nprocs`.
+   - `MPI_Reduce` and `MPI_Allreduce`: `sendbuf` and `recvbuf` must not overlap (use `MPI_IN_PLACE` on root for in-place reduce). The operation and datatype must match the C types being reduced.
+   - `MPI_Bcast` broadcasts from root to all ranks. Ensure root is the same value on every rank.
+
+6. **Wrong checksum due to domain decomposition errors:**
+   - Boundary elements (ghost cells / halo regions) not exchanged before computation cause incorrect results in stencil-based algorithms.
+   - Off-by-one errors in local array sizes: `local_n = N / nprocs` may leave a remainder. The last rank must handle `N - (nprocs-1) * local_n` elements, not `local_n`.
+   - Global indices computed incorrectly: `global_i = rank * local_n + local_i`. Verify this formula matches the scatter/gather pattern.
+   - Reduction result wrong: ensure the local partial result on each rank is correctly computed before `MPI_Reduce`.
+
+7. **Buffer size and pointer errors:**
+   - The receive buffer in `MPI_Recv` must be large enough for `count` elements of the specified datatype.
+   - `MPI_Scatter`/`MPI_Gather` send/receive buffers must not overlap.
+   - Passing a scalar by value instead of a pointer (`MPI_Send(&x, ...)` is correct; `MPI_Send(x, ...)` is wrong for non-pointer types).
+   - After `MPI_Scatter`, local arrays must be allocated with the correct local size, not the global size.
+
+8. **Rank 0 output correctness:**
+   - After a `MPI_Gather` or `MPI_Reduce`, only rank 0 should print the final result. Verify the gathered buffer on rank 0 is correct before printing.
+   - If non-root ranks also print, the output will be duplicated or interleaved. Guard all output with `if (rank == 0)`.
+
+9. **Non-blocking communication errors:**
+   - `MPI_Isend` / `MPI_Irecv` return immediately; the buffer must not be modified until `MPI_Wait` or `MPI_Waitall` confirms completion.
+   - The `MPI_Request` array must be large enough for all pending requests.
+   - Forgetting `MPI_Wait` after non-blocking operations leads to incomplete transfers and wrong results.
+
+10. **Communicator and rank range errors:**
+    - Valid ranks are 0 to `size - 1`. Sending to rank `size` (e.g., when computing a neighbor with `rank + 1` for the last rank) causes a runtime error.
+    - Use `MPI_PROC_NULL` as the destination/source for boundary ranks in halo exchanges to safely skip communication.
+
+11. **Process count assumptions:**
+    - Do not hardcode assumptions about the number of processes. Compute `local_n`, offsets, and loop bounds dynamically from `MPI_Comm_size`.
+    - If the algorithm requires a specific number of processes (e.g., power of 2), add a runtime check with an error message and `MPI_Abort`.
+
+12. **Memory allocation on each rank:**
+    - Each rank must allocate its own local buffer. Allocating a global-sized buffer on all ranks wastes memory but is only a correctness issue if indices are computed incorrectly.
+    - Check `malloc`/`calloc` return values — allocation failure is a runtime error that should be handled gracefully.
+
+13. **Incorrect distributed timing:**
+    - If execution time is reported, synchronize all ranks with `MPI_Barrier(MPI_COMM_WORLD)` immediately before the starting `MPI_Wtime()`.
+    - Every rank computes a `double elapsed_ms`, then **all ranks**, outside any `if (rank == 0)` block and outside OpenMP regions, must call:
+      `MPI_Reduce(&elapsed_ms, &max_elapsed_ms, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);`
+      where `max_elapsed_ms` is declared as `double` and initialized to `0.0`.
+    - Only rank 0 prints `max_elapsed_ms`. Printing rank 0's local `elapsed_ms` is incorrect because another rank may have taken longer.
+
+**Current code:**
+
+**Execution error details:**

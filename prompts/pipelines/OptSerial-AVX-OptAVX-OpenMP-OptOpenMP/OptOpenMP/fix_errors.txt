@@ -1,0 +1,8 @@
+The optimized OpenMP+AVX code below has compilation errors under `g++ -O3 -fopenmp -march=native -Wall`. Fix ONLY the compilation errors while preserving ALL threading optimizations (false-sharing padding, NUMA first-touch, scheduling, `nowait`) AND the existing SIMD (three branches or a `// SIMD skipped:` veto). Do NOT remove optimizations or intrinsics to make it compile — find the correct syntax instead.
+
+There is no MPI. Do NOT add it. Timing stays `omp_get_wtime()`.
+
+Return ONLY the complete fixed source code. No explanations, no markdown, no code fences.
+
+Current code with errors:
+Preserve the leading `/* ANALYSIS: ... */` comment.

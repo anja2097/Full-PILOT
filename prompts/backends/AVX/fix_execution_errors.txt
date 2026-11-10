@@ -1,0 +1,29 @@
+You are an expert C/C++ SIMD performance engineer.
+
+The following program is an AVX performance translation (explicit AVX-512/AVX2 in the timed kernel, or a documented SIMD veto). It COMPILES but produces INCORRECT RESULTS at runtime compared to the original serial version.
+
+Fix the runtime correctness issue while preserving the performance-translator-with-veto policy.
+
+## Strict rules
+
+1. Return ONLY the corrected complete source code. No explanations, no markdown, no code fences.
+2. The fixed program must produce IDENTICAL output (same checksum, same stdout) as the original serial version.
+3. If the timed kernel uses SIMD, preserve `__AVX512F__` / `__AVX2__` / scalar fallback. Fix the SIMD in the timed kernel; do not hide the bug by vectorizing checksum or init instead.
+4. If the timed kernel has `// SIMD skipped:`, keep it scalar. Do not add SIMD outside the timed region as a workaround.
+5. Remove or narrow a SIMD operation ONLY if it directly causes incorrect results and cannot be repaired (wrong independent-lane assumption). Prefer fixing tails, masks, FMA, and aliasing.
+6. The scalar `#else` fallback (when present) must always produce correct results.
+7. Do NOT move work into or out of the timed region.
+
+## Common causes of incorrect results with AVX intrinsics
+
+- **Illegal `__restrict__` aliasing**: if two pointer parameters alias (e.g. in-place), `__restrict__` is undefined behaviour. Remove it for those parameters.
+- **Wrong lane count in tail loop**: tail starts at `n - (n % 8)` for AVX-512 (8 doubles) and `n - (n % 4)` for AVX2 (4 doubles). Wrong offset skips or double-processes elements.
+- **Reduction order mismatch**: SIMD horizontal reductions accumulate in a different order than scalar loops. For order-sensitive timed kernels (prefix-like sums, Kahan), extract lanes and add in index order. Checksum loops **outside** the timed region should stay scalar — do not “fix” them with a different SIMD reduction.
+- **`_mm512_reduce_add_pd` vs manual reduction**: tree order may differ from a scalar sum. For order-sensitive timed reductions, extract lanes and sum in index order.
+- **Masked load with wrong mask**: AVX-512 tail mask must be `(1u << remaining) - 1`. A wrong mask reads/writes garbage lanes.
+- **AVX2 hadd reduction error**: `_mm256_hadd_pd` adds adjacent pairs. Verify: extract hi 128, add lo and hi, hadd 128, extract scalar.
+- **Alignment fault at runtime**: misaligned `_mm512_load_pd` can SIGBUS. Switch to `_mm512_loadu_pd`.
+- **FMA semantic difference**: `_mm512_fmadd_pd(a,b,c)` is one rounding; scalar `a*b + c` is two. Match scalar with separate `_mm512_mul_pd` + `_mm512_add_pd` if needed.
+- **SoA index mismatch**: after AoS→SoA, every access must use the per-component array, not the original struct index.
+- **Uninitialized accumulator**: zero SIMD accumulators before the loop (`_mm512_setzero_pd()`).
+- **SIMD applied under a veto**: if the timed kernel has a loop-carried dependence, conflict scatter, irregular gather, serial RNG, or strided transpose stores, revert that kernel to scalar and add `// SIMD skipped: <reason>` rather than patching illegal SIMD.

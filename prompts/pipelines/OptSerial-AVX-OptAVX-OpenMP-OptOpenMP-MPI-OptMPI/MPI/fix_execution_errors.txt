@@ -1,0 +1,33 @@
+You are an expert C/C++ parallel programming engineer.
+
+The following HYBRID MPI+OpenMP(+AVX) program COMPILES with `mpicxx -O3 -fopenmp -march=native` but produces INCORRECT RESULTS at runtime compared to the original.
+
+Fix the runtime correctness issue while preserving MPI, OpenMP, and the SIMD-or-veto decision.
+
+## Strict rules
+
+1. Return ONLY the corrected complete source code. No explanations, no markdown, no code fences.
+2. The program must produce the same output as the input within the tolerance stated in the Verification block (same printed lines; checksum within tolerance).
+3. Preserve MPI domain decomposition, OpenMP thread parallelism, and existing SIMD branches.
+4. Preserve `// SIMD skipped:` kernels as scalar.
+5. Remove or narrow a SIMD or parallelism construct ONLY if it directly causes incorrect results.
+6. Do NOT insert `MPI_Barrier` between the start and stop `MPI_Wtime`.
+
+## Common causes of incorrect results
+
+- **Global reduction missing**: each rank holds a partial result. `MPI_Reduce` or `MPI_Allreduce` must combine them. Rank 0 printing only its local sum is wrong.
+- **`MPI_Gather` vs `MPI_Reduce`**: scalar sums use `MPI_Reduce(MPI_SUM)`. Assembling an array uses `MPI_Gather` or `MPI_Gatherv` when chunk sizes differ.
+- **Wrong local bounds**: `local_start = rank * (N / size)`; the last rank's `local_end` is `N`. A fence-post skips or double-counts elements.
+- **SIMD tail on the local chunk**: the tail runs over `local_n % VECTOR_WIDTH`, not `N % VECTOR_WIDTH`.
+- **AVX-512 mask**: if `local_n % 8 != 0`, the mask is `(1 << (local_n % 8)) - 1`, not a mask built from global `N`.
+- **OpenMP reduction clobbering the MPI partial**: use a per-thread accumulator, then a scalar sum, then the MPI reduction. Do not reset a shared accumulator inside the parallel region.
+- **`__restrict__` aliasing**: if a collective writes a buffer that another pointer aliases, drop `__restrict__` on those parameters.
+- **Only rank 0 initializes data the others need**: scatter or broadcast before the timed kernel.
+- **Rank 0 reports only its local time**: `MPI_Barrier` immediately before the start `MPI_Wtime`, then every rank `MPI_Reduce`s `elapsed_ms` with `MPI_MAX` outside OpenMP regions. Only rank 0 prints `max_elapsed_ms`.
+- **Alignment fault**: unaligned `_mm512_load_pd` / `_mm256_load_pd` after chunking. Use the unaligned intrinsic.
+
+- **Input data differs from the input program:** if pseudo-random generation (rand, random, std::mt19937, ...) was parallelized, split across ranks, reseeded or reordered, the values change and the checksum no longer matches even if the kernel is correct. Restore the original generation code unchanged (outside OpenMP/MPI, same order); with MPI every rank runs it in full and keeps its slice, or rank 0 generates and scatters outside the timed region.
+
+**Current code:**
+
+**Execution error details:**

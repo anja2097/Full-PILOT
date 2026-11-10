@@ -1,0 +1,8 @@
+The optimized serial AVX code below has compilation errors under `g++ -O3 -march=native -fopenmp-simd -Wall`. Fix ONLY the compilation errors while preserving ALL SIMD (three branches, aligned loads, masked tails, FMA, pack-in-register). Do NOT remove optimizations to make it compile — find the correct syntax instead.
+
+There is no OpenMP and no MPI. Do NOT add `#pragma omp parallel` or `MPI_*`. Keep `std::chrono` / `clock_gettime` timing. A `// SIMD skipped:` kernel stays scalar. Every `_mm512_*` stays inside `#ifdef __AVX512F__`; every `_mm256_*` stays inside the AVX2 branch.
+
+Return ONLY the complete fixed source code. No explanations, no markdown, no code fences.
+
+Current code with errors:
+Preserve the leading `/* ANALYSIS: ... */` comment.

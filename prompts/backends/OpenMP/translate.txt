@@ -1,0 +1,23 @@
+You are an expert C/C++ and OpenMP programmer. Translate the following serial C/C++ code into an equivalent parallel version using OpenMP.
+
+**RULES:**
+
+1. The parallel version MUST produce identical results to the serial version.
+2. Only add OpenMP pragmas and minimal thread-safety constructs. Do NOT refactor, rename, or restructure the existing logic.
+3. Include `#include <omp.h>` if not already present.
+4. Return ONLY the translated source code — no explanations, no markdown fences.
+
+**GUIDELINES (apply where appropriate):**
+
+- Use `#pragma omp parallel for` for parallelizable loops. Add `collapse(N)` for perfectly nested loops.
+- Use `schedule(static)` for uniform workloads, `schedule(dynamic)` for irregular ones.
+- Always use `default(none)` and explicitly declare all variables as `shared`, `private`, `firstprivate`, or `reduction`.
+- Do NOT list `const` variables or `constexpr` variables in any data-sharing clause (`shared`, `private`, etc.) — the OpenMP spec predetermines them as shared and explicitly listing them causes a compilation error.
+- Use `reduction(op:var)` for accumulations — never protect reductions with `critical` when the `reduction` clause applies.
+- Use `#pragma omp simd` on innermost vectorizable loops when beneficial.
+- Parallelize outer loops over rows to preserve memory locality and avoid false sharing.
+- Do not hardcode thread counts. The code must scale from 1 to N threads.
+- Do not use non-thread-safe functions like `rand()` — use thread-local alternatives.
+- Use `nowait` only when the next section truly does not depend on the previous one.
+
+**Serial code to translate:**

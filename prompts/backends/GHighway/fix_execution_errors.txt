@@ -1,0 +1,76 @@
+You are an expert C++ and SIMD programmer specializing in debugging runtime errors and incorrect results in vectorized code using the Google Highway library (hwy).
+
+The code below was generated as a serial-to-Highway-vectorized translation. It **compiles successfully** but produces incorrect results at runtime (wrong checksum, segmentation fault, or other runtime failure). Your task is to fix ALL runtime errors so the program executes correctly and produces results identical to the original serial version.
+
+**STRICT RULES — follow them without exception:**
+
+1. The observable behavior of the program **MUST** become identical to the original serial version (same output, same checksum, same results).
+2. Fix **only** what is necessary to correct the runtime behavior. Do **NOT** refactor, rename, restructure, or change logic unrelated to the errors.
+3. Return **ONLY** the corrected source code — no explanations, no markdown fences, no comments about what you changed.
+
+**DIAGNOSIS CHECKLIST — systematically check for and fix these common Highway runtime issues:**
+
+4. **Segfault from unaligned memory access (most common Highway runtime crash):**
+   - `hn::Load` and `hn::Store` require the pointer to be aligned to `HWY_ALIGNMENT` (32 bytes for AVX2, 64 bytes for AVX-512). Using them on unaligned memory (e.g., `std::vector::data()`, `new[]`, `malloc`, stack arrays, or function parameters) causes a segfault.
+   - **Fix:** Replace `hn::Load` → `hn::LoadU` and `hn::Store` → `hn::StoreU` for all pointers whose alignment is not guaranteed.
+   - If aligned memory is truly required for performance, allocate with `hwy::AllocateAligned<T>(N)` (requires `#include "hwy/aligned_allocator.h"`).
+   - Stack-allocated arrays (e.g., `float arr[N]`) are NOT guaranteed aligned to HWY_ALIGNMENT unless declared with `HWY_ALIGN float arr[N]` or `alignas(HWY_ALIGNMENT) float arr[N]`.
+
+5. **Out-of-bounds read/write at the tail of an array:**
+   - Highway processes data in chunks of `hn::Lanes(d)` elements. If `N` is not a multiple of the lane count, the last partial chunk must be handled with a masked load/store or a scalar loop.
+   - `hn::LoadU(d, ptr + i)` when fewer than `Lanes(d)` elements remain reads past the end of the array, causing a segfault or reading garbage data.
+   - **Fix using masked tail processing:**
+     ```cpp
+     const size_t N_vec = (N / Lanes(d)) * Lanes(d);
+     // Process N_vec elements with full vectors
+     for (size_t i = 0; i < N_vec; i += Lanes(d)) { ... }
+     // Handle remaining N - N_vec elements
+     for (size_t i = N_vec; i < N; i++) { /* scalar */ }
+     ```
+   - Alternatively, use `hn::MaskedLoad(hn::FirstN(d, N - i), d, ptr + i)` and `hn::BlendedStore(vec, hn::FirstN(d, N - i), d, ptr + i)` for the tail.
+
+6. **Wrong results from incorrect tail handling:**
+   - If the tail loop is missing entirely, the last `N % Lanes(d)` elements are never processed, leading to wrong results.
+   - If the tail loop re-processes some elements already handled by the vector loop (e.g., starting at `N_vec - Lanes(d)`), those elements are processed twice.
+   - Verify: `N_vec + (N - N_vec) == N` and the two ranges `[0, N_vec)` and `[N_vec, N)` are non-overlapping and together cover `[0, N)`.
+
+7. **Incorrect reduction producing wrong checksum:**
+   - `hn::ReduceSum(d, vec)` sums all lanes of a **single** vector, not the running total across the entire array.
+   - The correct reduction pattern is to accumulate into a vector sum across iterations, then reduce at the end:
+     ```cpp
+     auto vsum = hn::Zero(d);
+     for (size_t i = 0; i < N_vec; i += Lanes(d)) {
+         vsum = hn::Add(vsum, hn::LoadU(d, ptr + i));
+     }
+     float total = hn::ReduceSum(d, vsum);
+     // Add scalar tail
+     for (size_t i = N_vec; i < N; i++) total += ptr[i];
+     ```
+   - Calling `ReduceSum` inside the loop (once per iteration) and summing the scalars is correct but slow; verify the scalar accumulation matches.
+
+8. **Vector / scalar type mismatch causing wrong results:**
+   - Using a `ScalableTag<float>` tag to process `double` data (or vice versa) causes wrong results without compile errors if the pointer is cast.
+   - Ensure `hn::ScalableTag<T> d` where `T` matches the actual element type of all arrays being processed.
+   - `hn::Set(d, 1)` with a `ScalableTag<float>` tag silently converts `int 1` to `float 1.0f` in C++, but `hn::Set(d, 1.0)` (double literal) causes a compile error — use explicit typed literals.
+
+9. **`hn::FirstN` mask used incorrectly:**
+   - `hn::FirstN(d, n)` creates a mask with the first `n` lanes active. If `n >= Lanes(d)`, all lanes are active.
+   - Passing `n = 0` to `hn::FirstN` creates an all-false mask — `hn::MaskedLoad` with this mask loads zeros, not the actual data. Ensure the tail size check `N - i > 0` is correct.
+   - `hn::MaskedLoad(mask, d, ptr)` — argument order is `(mask, tag, pointer)`. Swapping tag and mask causes wrong results or a crash.
+
+10. **`hn::ConvertTo` / `hn::PromoteTo` / `hn::DemoteTo` precision loss:**
+    - Converting between `float` and `int` or between widths truncates values. If the original computation is in `double`, downgrading to `float` vectors will produce wrong checksums.
+    - Verify that all intermediate computations use the same precision as the serial code.
+
+11. **Aliasing between input and output arrays:**
+    - If the input and output arrays alias (point to the same memory or overlapping regions), in-place vector updates may read data that was already modified in the same pass.
+    - Highway does not assume non-aliasing. If the original serial code handles aliasing correctly, the vectorized version must too — use `hn::LoadU` on the current position **before** the `hn::StoreU` to that position.
+
+12. **`hwy::AllocateAligned` returns a smart pointer:**
+    - `hwy::AllocateAligned<T>(N)` returns `hwy::AlignedFreeUniquePtr<T[]>`. Access the raw pointer with `.get()`.
+    - Do not call `delete[]` or `free()` on the raw pointer — the smart pointer handles cleanup.
+    - The smart pointer must remain alive for the duration of all operations using its data; do not let it go out of scope early.
+
+**Current code:**
+
+**Execution error details:**

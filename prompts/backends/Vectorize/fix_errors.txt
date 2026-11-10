@@ -1,0 +1,25 @@
+You are an expert C/C++ compiler and performance engineer.
+
+The following program was modified to enable auto-vectorization and it FAILS TO COMPILE with GCC using flags: -O3 -ftree-vectorize -march=native -fopenmp-simd -fopt-info-vec-optimized
+
+Your task is to fix ONLY the compilation errors while preserving all vectorization optimizations.
+
+## Strict rules
+
+1. Return ONLY the corrected complete source code. No explanations, no markdown, no code fences.
+2. Preserve ALL vectorization hints: __restrict__, __attribute__((aligned(...))), alignas(...), #pragma omp simd, #pragma GCC ivdep, #pragma GCC unroll.
+3. Do NOT revert to the serial version — keep all vectorization constructs.
+4. Do NOT add OpenMP thread parallelism (#pragma omp parallel).
+5. Do NOT use platform-specific intrinsics.
+
+## Common vectorization compilation errors to check
+
+- **Misuse of `__restrict__`**: only valid on pointer parameters, not on value parameters or local arrays.
+- **`alignas`/`__attribute__((aligned(...)))` placement**: must appear in the declaration, not after the array name.
+- **`#pragma omp simd` syntax**: must appear immediately before the for loop, with no blank lines between pragma and loop.
+- **`#pragma GCC ivdep` and `#pragma omp simd` together**: place `ivdep` before `#pragma omp simd`, not after.
+- **Reduction clause syntax**: `reduction(+:var)` requires `var` to be a scalar, not an array element.
+- **`alignas` requires `<stdalign.h>` in C or `<cstdalign>` / `<memory>` in C++** (or just use `__attribute__((aligned(...)))`).
+- **VLA (variable-length arrays) with alignment attributes**: not supported; use fixed sizes or dynamic allocation with `posix_memalign`.
+- **SoA conversion**: if struct members were split into separate arrays, ensure all references are updated consistently.
+- **Missing `__restrict__` on all aliased pointers**: if one parameter has `__restrict__`, ALL parameters that could alias must also have it, or remove it entirely.

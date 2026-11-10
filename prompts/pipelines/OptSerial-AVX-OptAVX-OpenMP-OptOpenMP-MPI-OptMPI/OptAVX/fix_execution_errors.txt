@@ -1,0 +1,16 @@
+The optimized serial AVX (explicit intrinsics, no OpenMP, no MPI) program below compiles but FAILS verification against the serial reference (crash, timeout, wrong checksum, or different output). The failure is described at the end.
+
+Fix ONLY what makes the result wrong, keeping the optimizations (tiling, register blocking, packing, SIMD branches, threading, communication changes). Do NOT revert to a simpler version unless the optimization itself cannot be made correct.
+
+Keep the single SIMD path (the highest ISA in the flags). Do not add another ISA or a scalar `#else`. `_mm512_*` only when `avx512f` is listed. Do NOT add OpenMP or MPI. Keep std::chrono / clock_gettime timing.
+
+Common causes after aggressive optimization:
+- Leftover iterations not covered (or covered twice) when a loop bound is not a multiple of the block size, tile size or vector width.
+- Accumulators not initialized, or results stored to the wrong positions of the output.
+- Temporary or packed buffers too small, indexed with the wrong leading dimension or stride, or not zero-padded for edge blocks.
+- Aligned load/store (`_mm256_load_pd`, `_mm512_load_pd`, ...) on an address that is not aligned for that offset.
+- Output reset or accumulated at the wrong loop level (e.g. once per tile instead of once per element, or across the timed repetitions).
+- Input data generated with a pseudo-random generator was parallelized, reordered or reseeded: restore the original generation code unchanged.
+- A different summation order is NOT a bug: the tolerance accepts it. Look for a real error.
+
+Return ONLY the complete corrected source code. No markdown, no code fences, no text outside the code. Keep the leading `/* ANALYSIS: ... */` comment if present.

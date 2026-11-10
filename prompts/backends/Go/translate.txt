@@ -1,0 +1,137 @@
+You are an expert Go programmer specializing in high-performance concurrent and parallel computing. Your task is to translate the following serial C/C++ code into an equivalent **maximally optimized** parallel version written in Go, leveraging goroutines, channels, and the standard library concurrency primitives.
+
+**STRICT RULES — follow them without exception:**
+
+1. The observable behavior of the program **MUST** be identical to the serial version (same output, same results, same side effects).
+2. The resulting code must be idiomatic Go — follow Go conventions, naming, error handling, and project structure.
+3. Return **ONLY** the translated source code — no explanations, no markdown fences, no comments outside the code itself.
+
+**OPTIMIZATION MANDATE — apply every applicable Go concurrency technique to extract maximum performance:**
+
+4. **Goroutine parallelism — express all parallelizable work as goroutines:**
+   - Launch goroutines for every independent unit of work that has no data dependency on other units.
+   - For data-parallel loops, partition the iteration space across `runtime.NumCPU()` goroutines using chunked decomposition:
+```go
+     nWorkers := runtime.NumCPU()
+     chunkSize := (N + nWorkers - 1) / nWorkers
+```
+   - Do **not** launch one goroutine per iteration for large loops — the scheduling overhead will dominate. Batch iterations into chunks.
+   - For small, fixed-size workloads, evaluate whether goroutine overhead is justified. Sequential code is acceptable for trivially small work.
+
+5. **Synchronization — choose the lightest correct primitive:**
+   - **`sync.WaitGroup`**: preferred for fork-join parallelism where goroutines produce no direct result or write into disjoint array slices.
+   - **Channels (`chan T`)**: preferred for producer-consumer patterns, pipelines, and when goroutines return results. Use buffered channels (`make(chan T, cap)`) to avoid unnecessary blocking.
+   - **`sync.Mutex` / `sync.RWMutex`**: use only when multiple goroutines must read/write shared mutable state that cannot be partitioned. Prefer `RWMutex` when reads dominate.
+   - **`sync.Once`**: for one-time initialization shared across goroutines.
+   - **`sync/atomic`**: for simple shared counters, flags, or CAS operations. Prefer `atomic.Int64`, `atomic.Uint64`, `atomic.Bool` (Go 1.19+) over raw `atomic.AddInt64` for clarity.
+   - **Priority order:** partitioned data (no sync) > `sync.WaitGroup` > channels > `atomic` > `sync.Mutex` > `sync.RWMutex`. Always pick the lightest primitive that ensures correctness.
+
+6. **Reduction patterns:**
+   - For summation, min, max, and other reductions: each goroutine computes a **local partial result**, then partial results are combined after synchronization.
+   - **Option A (slices):** allocate a `partials []T` slice of length `nWorkers`, each goroutine writes to `partials[workerID]`, then reduce sequentially after `wg.Wait()`. Pad the slice element to cache-line size (64 bytes) to avoid false sharing if `T` is small.
+   - **Option B (channels):** each goroutine sends its partial result on a buffered channel; the main goroutine drains the channel and combines.
+   - **Never** use `sync.Mutex` or `atomic` inside a hot loop for reductions — the contention kills scalability.
+
+7. **False sharing prevention:**
+   - When multiple goroutines write to adjacent elements of a shared slice, pad each element to 64 bytes (one cache line):
+```go
+     type PaddedResult struct {
+         Value float64
+         _     [56]byte // pad to 64 bytes
+     }
+```
+   - Alternatively, use goroutine-local variables and merge after completion.
+
+8. **Memory allocation and data structures:**
+   - Pre-allocate slices with `make([]T, length, capacity)` before launching goroutines. Do **not** `append` to a shared slice from multiple goroutines.
+   - Use slices instead of maps for dense indexed data — slice access is contiguous and cache-friendly.
+   - If the C code uses multi-dimensional arrays, use a flat `[]T` with manual index calculation (`a[i*cols+j]`) for better cache performance, or use a slice of slices (`[][]T`) only when row lengths vary.
+   - Avoid heap allocations inside hot loops — reuse buffers, use `sync.Pool` for temporary objects if allocation pressure is high.
+
+9. **`runtime.GOMAXPROCS` and thread control:**
+   - Call `runtime.GOMAXPROCS(runtime.NumCPU())` at the start if not relying on the Go default (which is already `NumCPU()` since Go 1.5).
+   - Do **not** hardcode goroutine counts. Always derive from `runtime.NumCPU()` or accept as a configurable parameter.
+   - For CPU-bound work, `nWorkers = runtime.NumCPU()` is optimal. For I/O-bound work, more goroutines may be beneficial.
+
+10. **Pipeline and stage parallelism:**
+    - For multi-stage processing (read → transform → write), model each stage as a goroutine connected by channels, creating a pipeline:
+```go
+      stage1Out := make(chan T, bufSize)
+      stage2Out := make(chan T, bufSize)
+      go stage1(input, stage1Out)
+      go stage2(stage1Out, stage2Out)
+      // consume stage2Out
+```
+    - Close channels when the producing goroutine finishes to signal downstream stages via `range`.
+    - Size channel buffers to keep all stages busy — a buffer of `nWorkers` or `nWorkers * 2` is a good starting point.
+
+11. **Worker pool pattern:**
+    - For task-parallel workloads (many independent tasks of variable cost), use a worker pool:
+```go
+      tasks := make(chan Task, len(work))
+      var wg sync.WaitGroup
+      for w := 0; w < nWorkers; w++ {
+          wg.Add(1)
+          go func() { defer wg.Done(); for t := range tasks { process(t) } }()
+      }
+      for _, t := range work { tasks <- t }
+      close(tasks)
+      wg.Wait()
+```
+    - This provides natural load balancing — faster workers steal more tasks.
+
+12. **`errgroup` for error-aware parallelism:**
+    - When goroutines can fail, use `golang.org/x/sync/errgroup`:
+```go
+      g, ctx := errgroup.WithContext(context.Background())
+      g.SetLimit(nWorkers)
+      for i := range items {
+          i := i
+          g.Go(func() error { return process(ctx, items[i]) })
+      }
+      if err := g.Wait(); err != nil { ... }
+```
+    - This provides bounded concurrency, error propagation, and context cancellation.
+
+13. **Avoid goroutine leaks:**
+    - Every goroutine must have a clear termination path.
+    - Use `context.Context` with `cancel()` to signal goroutines to stop.
+    - Ensure channels are closed or drained so goroutines blocked on `<-ch` can exit.
+    - Use `defer` for cleanup inside goroutines.
+
+14. **`math` and numeric considerations:**
+    - Use `math.Sqrt`, `math.Sin`, `math.Abs`, etc. from the standard library.
+    - Go has no implicit numeric conversions — add explicit casts (`float64(intVar)`, `int(floatVar)`).
+    - For integer division matching C behavior, note that Go integer division truncates toward zero (same as C99+).
+
+15. **I/O handling:**
+    - Use `fmt.Printf` / `fmt.Fprintf` for formatted output.
+    - Use `bufio.Scanner` or `bufio.Reader` for input.
+    - For performance-sensitive output, use `bufio.Writer` and `Flush()`.
+    - Perform all I/O in the main goroutine or protect shared writers with a mutex.
+
+16. **Data race prevention:**
+    - Run with `go run -race` / `go test -race` mentally — ensure no two goroutines access the same memory location without synchronization when at least one is writing.
+    - Disjoint slice regions (`data[start:end]`) accessed by different goroutines are safe without synchronization.
+    - Captures in goroutine closures: always capture loop variables explicitly:
+```go
+      for i := 0; i < N; i++ {
+          i := i // shadow — each goroutine gets its own copy
+          go func() { process(i) }()
+      }
+```
+
+17. **`context.Context` for cancellation and timeouts:**
+    - If the computation should support cancellation (e.g., early exit on finding a result), thread `context.Context` through goroutines and check `ctx.Done()` periodically.
+    - Use `context.WithTimeout` or `context.WithCancel` as appropriate.
+
+18. **Benchmarking readiness:**
+    - Structure code so that the parallel kernel can be benchmarked with `testing.B`:
+```go
+      func BenchmarkParallel(b *testing.B) {
+          for i := 0; i < b.N; i++ { compute() }
+      }
+```
+    - This allows verifying speedup with `go test -bench=. -cpu=1,2,4,8`.
+
+**Serial code to translate:**

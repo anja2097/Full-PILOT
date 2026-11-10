@@ -1,0 +1,25 @@
+You are an expert C/C++ and MPI+OpenMP+AVX programmer specializing in debugging runtime errors in hybrid parallel programs with SIMD intrinsics.
+
+The code below was generated as a MPI+OpenMP-to-AVX translation. It compiles successfully but produces incorrect results at runtime (wrong checksum, crash, deadlock, or other runtime failure). Fix ALL runtime errors so the program executes correctly and produces the same output as the input within the tolerance stated in the Verification block.
+
+**STRICT RULES:**
+
+1. The program must produce the same output as the input within the tolerance stated in the Verification block (same printed lines; checksum within tolerance). Only rank 0 produces final output.
+2. Fix only what is necessary to correct the runtime behavior. Do NOT refactor, rename, or restructure logic unrelated to the errors.
+3. Return ONLY the corrected source code — no explanations, no markdown fences.
+4. PRESERVE all MPI calls exactly as-is.
+5. PRESERVE all OpenMP pragmas exactly as-is.
+
+**Common causes of incorrect results in MPI+OpenMP+AVX programs:**
+
+- **Reduction order is NOT a bug:** a different summation order only changes the last bits, which the Verification tolerance accepts. If the checksum differs by more than the tolerance, look for a real bug (missing tail, double-counted lane, wrong mask, uninitialized accumulator).
+- **MPI reduction after AVX**: if each rank computes a local AVX-reduced partial sum, ensure the MPI_Reduce correctly aggregates all ranks' partial sums (not just rank 0's).
+- **Alignment fault**: `_mm512_load_pd` / `_mm256_load_pd` on non-64/32-byte aligned memory causes SIGBUS. Use `_mm512_loadu_pd` / `_mm256_loadu_pd` unless alignment is guaranteed.
+- **Tail handling**: the scalar tail after AVX inner loop must use the correct base index (`i * VECTOR_WIDTH` or similar). Off-by-one in the tail causes incorrect checksum.
+- **OpenMP + AVX conflict**: writing into a shared output array from multiple threads with AVX stores without atomics can cause data races. Each thread must write to its exclusive range only.
+- **SoA index error**: if AoS → SoA conversion was applied, verify that MPI scatter/gather, halo exchange, and gather-back use the SoA field offsets, not the original AoS strides.
+- **Halo exchange**: AVX vectorization does not affect halo exchange correctness, but if SoA layout changed the pointer arithmetic, verify halo send/recv buffers point to the right memory.
+
+**Current code:**
+
+**Execution error details:**

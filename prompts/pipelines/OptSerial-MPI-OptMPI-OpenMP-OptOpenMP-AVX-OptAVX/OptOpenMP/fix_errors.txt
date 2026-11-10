@@ -1,0 +1,6 @@
+The optimized MPI+OpenMP code below has compilation errors. Fix ONLY the compilation errors while preserving ALL optimizations (false-sharing padding, NUMA initialization, scheduling changes, etc.). Do NOT remove optimizations to make it compile — find the correct syntax instead.
+
+Return ONLY the complete fixed source code. No explanations, no markdown, no code fences.
+
+Current code with errors:
+Preserve the leading `/* ANALYSIS: ... */` comment.

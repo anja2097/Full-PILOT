@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+*.out
+.venv/
+logs/
+logs_copy/
+new_benchmarks_paper/
+tests/

@@ -1,0 +1,31 @@
+You are an expert C/C++ parallel programming engineer.
+
+The following HYBRID MPI+OpenMP(+AVX) program FAILS TO COMPILE. It may use three-branch SIMD (`__AVX512F__` / `__AVX2__` / scalar) or a documented SIMD veto (`// SIMD skipped:`).
+
+Your task is to fix ONLY the compilation errors while preserving MPI domain decomposition, OpenMP, and the SIMD-or-veto decision.
+
+## Strict rules
+
+1. Return ONLY the corrected complete source code. No explanations, no markdown, no code fences.
+2. PRESERVE the MPI+OpenMP hybrid structure.
+3. PRESERVE existing SIMD branches in every function that has them.
+4. PRESERVE `// SIMD skipped:` kernels as scalar.
+5. Do NOT revert a SIMD timed kernel to a pure OpenMP, pure MPI, or scalar version.
+6. Keep `#include <mpi.h>` and `#include <omp.h>`. Keep `#include <immintrin.h>` if the file uses intrinsics.
+
+## Common hybrid MPI+OpenMP+AVX compilation errors
+
+- **Missing headers**: `<mpi.h>`, `<omp.h>`, `<immintrin.h>` must all be present.
+- **MPI type mismatches**: `MPI_INT` for `int`, `MPI_DOUBLE` for `double`. Do not mix.
+- **Wrong MPI function signatures**: check argument order for `MPI_Gather`, `MPI_Reduce`, `MPI_Scatter`, `MPI_Bcast`.
+- **`MPI_Gather` count parameter**: per-process count, not global size.
+- **`__m512d` / `__m256d` in OpenMP `private` clause**: these types may not be listable in some GCC versions. Declare them as local variables inside the parallel region instead.
+- **`default(none)` missing MPI variables**: `rank`, `size`, `local_start`, `local_end` must be listed as `shared` or `firstprivate`.
+- **Aligned loads after MPI decomposition**: if `local_start` is not aligned, `_mm512_load_pd` raises SIGBUS. Switch to `_mm512_loadu_pd` / `_mm256_loadu_pd` when operating on a rank-local sub-array starting at a non-aligned offset.
+- **AVX-512 masked loads**: `__mmask8` belongs inside `#ifdef __AVX512F__` (enabled by `-march=native` on AVX-512 hosts). Do not rewrite the AVX-512 branch to AVX2 to paper over a missing guard.
+- **`MPI_Finalize` before output**: move all rank-0 `printf`/`cout` calls before `MPI_Finalize`.
+- **`rank` and `size` declared as `unsigned`**: must be `int`.
+- **Local buffer size**: if `local_n = N / size` is used for allocation but the last rank handles remainder `N % size` extra elements, allocate `local_n + remainder` on that rank.
+- **Distributed timing reduction**: preserve or restore a `double max_elapsed_ms = 0.0;` and ensure all ranks call, outside rank-0 conditionals and OpenMP regions:
+  `MPI_Reduce(&elapsed_ms, &max_elapsed_ms, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);`
+  All ranks must synchronize with `MPI_Barrier(MPI_COMM_WORLD)` before the starting `MPI_Wtime()`, and only rank 0 may print `max_elapsed_ms`.

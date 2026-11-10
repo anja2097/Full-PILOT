@@ -1,0 +1,6 @@
+The optimized MPI code below has compilation errors. Fix ONLY the compilation errors while preserving ALL optimizations (non-blocking communication, buffer aggregation, aligned buffers, etc.). Do NOT remove optimizations to make it compile — find the correct syntax instead.
+
+Return ONLY the complete fixed source code. No explanations, no markdown, no code fences.
+
+Current code with errors:
+Preserve the leading `/* ANALYSIS: ... */` comment.

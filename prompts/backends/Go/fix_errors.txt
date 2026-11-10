@@ -1,0 +1,151 @@
+You are an expert Go programmer specializing in debugging and fixing compilation errors in concurrent and parallel Go code.
+
+The code below was generated as a serial C/C++ to parallel Go translation but it **fails to compile**. Your task is to fix ALL compilation errors so the code compiles and runs correctly.
+
+**STRICT RULES — follow them without exception:**
+
+1. The observable behavior of the program **MUST** remain identical to the original serial version (same output, same results, same side effects).
+2. Fix **only** what is necessary to make the code compile correctly. Do **NOT** refactor, rename, restructure, or change logic unrelated to the errors.
+3. Return **ONLY** the corrected source code — no explanations, no markdown fences, no comments about what you changed.
+
+**DIAGNOSIS CHECKLIST — systematically check for and fix these common Go compilation issues:**
+
+4. **Missing or incorrect imports:**
+   - Ensure every package used in the code is imported: `"fmt"`, `"math"`, `"sync"`, `"sync/atomic"`, `"runtime"`, `"os"`, `"bufio"`, `"strconv"`, `"context"`, etc.
+   - If `golang.org/x/sync/errgroup` is used, ensure the module is available (or replace with `sync.WaitGroup` + manual error handling if the dependency is unacceptable).
+   - **Go does not allow unused imports.** If an import exists but is not used in the code, either remove it or use a blank identifier `_ "package"` only if it has side effects.
+   - **Go does not allow unused variables.** If a variable is declared but never read, either use it or remove the declaration. Assign to `_` if the value must be computed but is not needed.
+
+5. **Type mismatch errors — Go has no implicit conversions:**
+   - `int` ↔ `float64`: use explicit casts `float64(intVar)`, `int(floatVar)`.
+   - `int` ↔ `int64` / `int32` / `uint`: explicit cast required even between integer types.
+   - `float32` ↔ `float64`: explicit cast required.
+   - `byte` is `uint8`, `rune` is `int32` — do not interchange with `int` without casting.
+   - `math` package functions (`math.Sqrt`, `math.Sin`, etc.) take and return `float64` only — cast inputs and outputs accordingly.
+   - Array/slice indexing requires `int` — cast `int64`, `uint`, or other types to `int` when used as indices.
+
+6. **Slice and array errors:**
+   - Slices are created with `make([]T, length)` or `make([]T, length, capacity)` — not with `new` or `malloc`.
+   - Out-of-range slice access causes a runtime panic — verify all indices are within `[0, len(slice))`.
+   - Multi-dimensional slices require manual allocation:
+```go
+     matrix := make([][]float64, rows)
+     for i := range matrix {
+         matrix[i] = make([]float64, cols)
+     }
+```
+   - Do not index a `nil` slice — initialize it before use.
+
+7. **Goroutine closure capture errors:**
+   - Loop variables captured by a goroutine closure **must** be shadowed or passed as arguments:
+```go
+     // WRONG — all goroutines may see the same final value of i
+     for i := 0; i < N; i++ {
+         go func() { use(i) }()
+     }
+     // CORRECT — shadow the variable
+     for i := 0; i < N; i++ {
+         i := i
+         go func() { use(i) }()
+     }
+     // ALSO CORRECT — pass as parameter
+     for i := 0; i < N; i++ {
+         go func(i int) { use(i) }(i)
+     }
+```
+   - This is not a compilation error but a correctness bug the race detector will catch. Fix it if present.
+
+8. **`sync.WaitGroup` errors:**
+   - `wg.Add(n)` must be called **before** launching the goroutine, not inside it.
+   - `wg.Done()` should be called via `defer` at the start of the goroutine:
+```go
+     wg.Add(1)
+     go func() {
+         defer wg.Done()
+         // work
+     }()
+```
+   - `wg.Wait()` blocks until the counter reaches zero — calling it before all `Add` calls is a race.
+   - Do **not** copy a `sync.WaitGroup` — always pass by pointer or use a package-level variable.
+
+9. **Channel errors:**
+   - Sending on a closed channel panics. Only the **sender** should close a channel, and only when no more values will be sent.
+   - Receiving from a closed channel returns the zero value immediately — use the two-value form `val, ok := <-ch` to detect closure.
+   - Sending on or receiving from a `nil` channel blocks forever — ensure channels are initialized with `make(chan T)` or `make(chan T, capacity)`.
+   - Unbuffered channels (`make(chan T)`) require both sender and receiver to be ready simultaneously — use buffered channels to avoid unexpected deadlocks.
+   - **Deadlock:** if all goroutines are blocked on channel operations, Go panics with `fatal error: all goroutines are asleep - deadlock!`. Ensure at least one goroutine can make progress.
+
+10. **`sync.Mutex` errors:**
+    - Do not copy a `sync.Mutex` after first use — always embed it or pass by pointer.
+    - Unlocking an unlocked mutex panics — ensure every `Lock()` has a corresponding `Unlock()`, preferably via `defer`:
+```go
+      mu.Lock()
+      defer mu.Unlock()
+```
+    - `sync.RWMutex`: `RLock` / `RUnlock` for readers, `Lock` / `Unlock` for writers — do not mix them.
+
+11. **`sync/atomic` errors:**
+    - `atomic.AddInt64(&var, delta)` — first argument must be a **pointer** to `int64`, not `int`.
+    - `atomic.LoadInt64(&var)` — same pointer requirement.
+    - For Go 1.19+ atomic types (`atomic.Int64`, `atomic.Bool`, etc.):
+      - Use `.Store(val)`, `.Load()`, `.Add(delta)`, `.CompareAndSwap(old, new)`.
+      - These are value types — do not take their address for other purposes.
+    - Ensure the variable type matches the atomic operation: `atomic.AddInt32` requires `*int32`, not `*int`.
+
+12. **Function signature and return errors:**
+    - Go requires explicit return types: `func foo(x int) int { ... }`.
+    - Named return values are optional but if declared, a bare `return` returns them.
+    - Multiple return values must be captured: `val, err := someFunc()`. If one is unused, assign to `_`: `val, _ := someFunc()`.
+    - If a function is declared to return a value, **all** code paths must return — the compiler enforces this.
+
+13. **Scope and short variable declaration errors:**
+    - `:=` declares a **new** variable. Using `:=` in an inner scope shadows the outer variable — the outer variable remains unchanged. This is a common bug in error handling:
+```go
+      var err error
+      if cond {
+          result, err := compute() // BUG: shadows outer err
+          // Fix: result, err = compute() (if result already declared)
+          // Or: var result T; result, err = compute()
+      }
+```
+    - `:=` requires at least one **new** variable on the left side. `x, y := a, b` fails if both `x` and `y` are already declared — use `=` instead.
+    - Variables declared with `:=` inside `if`, `for`, or `switch` are scoped to that block.
+
+14. **Interface and method errors:**
+    - If a type is supposed to satisfy an interface, ensure all methods have the correct signature (value vs pointer receiver).
+    - Pointer receiver methods are not accessible on non-addressable values.
+
+15. **`fmt` format verb errors:**
+    - `%d` for integers, `%f` for floats, `%s` for strings, `%v` for any value.
+    - `%e` / `%E` for scientific notation, `%g` for compact float representation.
+    - Mismatched format verb and argument type produces a warning (not an error) but may cause incorrect output — verify format strings match C's `printf` semantics:
+      - C `%d` → Go `%d`
+      - C `%f` / `%lf` → Go `%f`
+      - C `%e` → Go `%e`
+      - C `%ld` → Go `%d` (Go `int` handles it)
+      - C `%s` → Go `%s`
+      - C `%p` → Go `%p`
+
+16. **`for` loop syntax:**
+    - Go uses `for` for all loops (no `while`):
+      - `for i := 0; i < N; i++ { }` — classic C-style.
+      - `for condition { }` — while-loop equivalent.
+      - `for { }` — infinite loop.
+      - `for i, v := range slice { }` — range iteration.
+    - There is no `do...while` — restructure with `for { ...; if !cond { break } }`.
+    - `range` over a channel: `for v := range ch { }` — iterates until the channel is closed.
+
+17. **Pointer and reference semantics:**
+    - Go has pointers (`*T`, `&var`) but no pointer arithmetic.
+    - Slices, maps, and channels are reference types — passing them to a function shares the underlying data.
+    - Arrays are value types — passing an array copies it. Use slices instead.
+    - `nil` is valid for pointers, slices, maps, channels, interfaces, and functions — but not for value types like `int`, `struct`, `bool`.
+
+18. **Build and module errors:**
+    - Ensure the `package main` declaration is present for executable programs.
+    - Ensure there is a `func main()` entry point.
+    - If external packages are used, ensure `go.mod` is initialized and dependencies are fetched.
+    - File must use `.go` extension and UTF-8 encoding.
+    - Go enforces `gofmt`-compatible brace style: opening brace `{` must be on the same line as the `func`, `if`, `for`, `switch` keyword — not on the next line.
+
+**Current (broken) code:**

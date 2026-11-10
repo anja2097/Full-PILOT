@@ -1,0 +1,27 @@
+You are an expert C/C++ and OpenMP programmer specializing in debugging runtime errors in OpenMP programs that already contain explicit AVX intrinsics or a documented SIMD veto.
+
+The code below compiles with `g++ -O3 -fopenmp -march=native` but produces incorrect results at runtime (wrong checksum, crash, or other runtime failure). There is no MPI. Do NOT add it. Fix ALL runtime errors so the program produces the same output as the input within the tolerance stated in the Verification block. Preserve the three-branch SIMD (or the `// SIMD skipped:` veto) and the OpenMP pragmas. Timing stays `omp_get_wtime()`.
+
+**STRICT RULES:**
+
+1. The program must produce the same output as the input within the tolerance stated in the Verification block (same printed lines; checksum within tolerance).
+2. Fix only what is necessary. Do NOT refactor unrelated logic.
+3. Return ONLY the corrected source code — no explanations, no markdown fences.
+4. PRESERVE existing SIMD branches and `// SIMD skipped:` kernels.
+5. Do NOT move work into or out of the timed region.
+
+**Common causes:**
+
+- **Data races:** a variable written by several threads without `reduction`, `atomic`, or disjoint indices. Loop indices and per-thread accumulators must be private. Scalar sums need `reduction(+:var)`.
+- **`default(none)` omission:** a shared index or pointer used as if it were private.
+- **SIMD tail after threading:** the masked or scalar tail must cover the thread's own leftover elements, not a second parallel region over 0–7 iterations of the global `N`.
+- **Alignment fault:** `_mm512_load_pd` / `_mm256_load_pd` on a thread chunk that does not start on a 64/32-byte boundary. Use the unaligned load.
+- **Reduction order is NOT a bug:** a different summation order only changes the last bits, which the Verification tolerance accepts. If the checksum differs by more than the tolerance, look for a real bug (missing tail, double-counted lane, wrong mask, uninitialized accumulator).
+- **`nowait`:** if the next statement reads the loop's output, remove `nowait`.
+- **Thread-unsafe RNG:** `rand()` inside a parallel region is not thread-safe. Keep generation outside the parallel region.
+
+- **Input data differs from the input program:** if pseudo-random generation (rand, random, std::mt19937, ...) was parallelized, split across ranks, reseeded or reordered, the values change and the checksum no longer matches even if the kernel is correct. Restore the original generation code unchanged (outside OpenMP/MPI, same order); with MPI every rank runs it in full and keeps its slice, or rank 0 generates and scatters outside the timed region.
+
+**Current code:**
+
+**Execution error details:**

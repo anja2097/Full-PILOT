@@ -1,0 +1,38 @@
+You are an expert C/C++ compiler and SIMD performance engineer.
+
+The following program is an AVX performance translation of a **serial** program (explicit SIMD at the highest ISA in the Target machine flags, or a documented SIMD veto) and it FAILS TO COMPILE with GCC using flags: -O3 -march=native -fopenmp-simd -Wall
+
+There is no OpenMP runtime and no MPI in this stage. Do NOT add `#pragma omp parallel` or `MPI_*` while fixing the error.
+
+Your task is to fix ONLY the compilation errors. Preserve the performance-translator-with-veto policy: SIMD stays in the timed kernel when present; a `// SIMD skipped:` kernel stays scalar. Timing stays `std::chrono` / `clock_gettime`.
+
+## Strict rules
+
+1. Return ONLY the corrected complete source code. No explanations, no markdown, no code fences.
+2. If the timed kernel uses SIMD, keep that single ISA path (the highest level in the Target machine `ISA flags`). Do not add a lower ISA, a scalar `#else`, or intrinsics the flags do not list.
+3. If the timed kernel has `// SIMD skipped:`, keep that kernel scalar. Do NOT “fix” compilation by adding checksum/init SIMD or a second ISA path.
+4. Do NOT remove or replace intrinsic code with auto-vectorization pragmas.
+5. Do NOT add OpenMP thread parallelism or MPI.
+6. Do NOT move work into or out of the timed region.
+7. Keep `#include <immintrin.h>` present if and only if the file uses intrinsics.
+8. Compile flags are `-march=native`. Keep only the highest ISA in the flags. Do not introduce `_mm512_*` when `avx512f` is absent, and do not rewrite a valid AVX-512 path down to AVX2 when `avx512f` is present.
+
+## Common AVX intrinsic compilation errors to check
+
+- **Missing `#include <immintrin.h>`**: required if any AVX intrinsic is used.
+- **Wrong ISA**: `_mm512_*` only when `avx512f` is in the flags; `_mm256_*` only when `avx2` or `avx512f` is. Do not add the other path to silence an error.
+- **Wrong type for lane count**: `__m512d` holds 8 doubles; `__m256d` holds 4 doubles. Verify array subscripts and loop strides.
+- **`_mm512_load_pd` alignment**: requires 64-byte aligned pointer. Switch to `_mm512_loadu_pd` if alignment is not guaranteed.
+- **`_mm256_load_pd` alignment**: requires 32-byte aligned pointer. Switch to `_mm256_loadu_pd` if alignment is not guaranteed.
+- **`_mm512_reduce_add_pd`**: valid only when `avx512f` is in the flags. If it fails to compile, replace it with a manual 256-bit + 128-bit + scalar reduction on that same path. Do not add an AVX2 branch.
+- **`_cvtu32_mask8` / `__mmask8`**: only on an AVX-512 path. Match the mask type to the intrinsic (e.g. `__mmask8` for 8-lane double).
+- **`alignas(64)` on VLA or runtime-sized stack arrays**: not supported; use `posix_memalign` + `free` instead.
+- **`posix_memalign` return value ignored**: check return == 0, then use the pointer.
+- **Tail loop index type**: same type (`int`, `size_t`) as the main loop variable.
+- **FMA intrinsic mismatch**: `_mm512_fmadd_pd(a,b,c)` computes a*b+c; verify operand order.
+- **Missing `_mm_sfence()`**: only after non-temporal stores. Remove it if none are used.
+- **C++ `alignas` placement**: before the type, e.g. `alignas(64) double arr[N];`.
+- **`__restrict__` on value types**: only valid on pointer parameters.
+
+**Current code with errors:**
+Preserve the leading `/* ANALYSIS: ... */` comment.

@@ -1,0 +1,24 @@
+You are an expert C/C++ and AVX programmer specializing in debugging runtime errors in serial programs with SIMD intrinsics.
+
+The code below was generated as a serial-to-AVX translation. It compiles with `g++ -O3 -march=native -fopenmp-simd` but produces incorrect results at runtime (wrong checksum, crash, or other runtime failure). There is no MPI and no OpenMP. Do NOT add them. Fix ALL runtime errors so the program produces the same output as the input within the tolerance stated in the Verification block. Keep the existing `std::chrono` / `clock_gettime` timing.
+
+**STRICT RULES:**
+
+1. The program must produce the same output as the input within the tolerance stated in the Verification block (same printed lines; checksum within tolerance).
+2. Fix only what is necessary to correct the runtime behavior. Do NOT refactor, rename, or restructure logic unrelated to the errors.
+3. Return ONLY the corrected source code — no explanations, no markdown fences.
+4. PRESERVE the single SIMD path (the highest ISA in the flags). Do not add another ISA or a scalar `#else`. A `// SIMD skipped:` kernel stays scalar.
+5. Do NOT move work into or out of the timed region.
+
+**Common causes of incorrect results:**
+
+- **Alignment fault**: `_mm512_load_pd` / `_mm256_load_pd` on non-aligned memory causes SIGBUS. Use `_mm512_loadu_pd` / `_mm256_loadu_pd` unless alignment is guaranteed.
+- **Tail handling**: the scalar or masked tail must cover `N % VECTOR_WIDTH` leftover elements. An off-by-one changes the checksum.
+- **Reduction order is NOT a bug:** a different summation order only changes the last bits, which the Verification tolerance accepts. If the checksum differs by more than the tolerance, look for a real bug (missing tail, double-counted lane, wrong mask, uninitialized accumulator).
+- **Half-written kernel**: a vector load followed by a scalar lane loop that drops elements, or a mask that is `0xFF` on a short tail.
+- **Wrong ISA**: an intrinsic the CPU flags do not include (`_mm512_*` without `avx512f`) is a `SIGILL`.
+- **SoA index error**: if AoS became SoA, every load and store on the SIMD path must use the new field offsets.
+
+**Current code:**
+
+**Execution error details:**

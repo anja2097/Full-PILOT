@@ -1,0 +1,8 @@
+The optimized hybrid MPI+OpenMP(+AVX) code below has compilation errors under `mpicxx -O3 -fopenmp -march=native -Wall`. Fix ONLY the compilation errors while preserving ALL communication optimizations (non-blocking exchanges, aggregated buffers, 64-byte alignment) AND the existing OpenMP pragmas and SIMD (the single path, or a `// SIMD skipped:` veto). Do not add another ISA. Do NOT remove optimizations, pragmas, or intrinsics to make it compile — find the correct syntax instead.
+
+Do NOT insert `MPI_Barrier` between the start and stop `MPI_Wtime`. Do NOT move MPI calls into an OpenMP region.
+
+Return ONLY the complete fixed source code. No explanations, no markdown, no code fences.
+
+Current code with errors:
+Preserve the leading `/* ANALYSIS: ... */` comment.

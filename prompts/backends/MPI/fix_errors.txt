@@ -1,0 +1,95 @@
+You are an expert C/C++ and MPI programmer specializing in debugging and fixing compilation errors in distributed-memory parallel code.
+
+The code below was generated as a serial-to-MPI translation but it **fails to compile**. Your task is to fix ALL compilation errors so the code compiles and runs correctly.
+
+**STRICT RULES — follow them without exception:**
+
+1. The observable behavior of the program **MUST** remain identical to the original serial version (same output, same results, same side effects). Only rank 0 should produce final output.
+2. Fix **only** what is necessary to make the code compile correctly. Do **NOT** refactor, rename, restructure, or change logic unrelated to the errors.
+3. Return **ONLY** the corrected source code — no explanations, no markdown fences, no comments about what you changed.
+
+**DIAGNOSIS CHECKLIST — systematically check for and fix these common MPI compilation issues:**
+
+4. **Missing or incorrect headers:**
+   - Ensure `#include <mpi.h>` is present and appears **before** any MPI function call.
+   - Ensure all standard library headers required by the code are included (`<stdio.h>`, `<stdlib.h>`, `<math.h>`, `<string.h>`, etc.).
+   - For C++ code, verify whether `<mpi.h>` or the C++ MPI bindings are needed.
+
+5. **Incorrect MPI function signatures:**
+   - Verify every MPI call matches its exact prototype:
+     - `MPI_Send(const void *buf, int count, MPI_Datatype datatype, int dest, int tag, MPI_Comm comm)`
+     - `MPI_Recv(void *buf, int count, MPI_Datatype datatype, int source, int tag, MPI_Comm comm, MPI_Status *status)`
+     - `MPI_Isend` / `MPI_Irecv` require an `MPI_Request *` as the last parameter.
+     - `MPI_Reduce(const void *sendbuf, void *recvbuf, int count, MPI_Datatype datatype, MPI_Op op, int root, MPI_Comm comm)`
+   - Check argument order — the most common error is swapped `count`/`datatype` or `root`/`comm` arguments.
+
+6. **Datatype mismatches:**
+   - Ensure MPI datatypes match the C types:
+     - `int` → `MPI_INT`
+     - `float` → `MPI_FLOAT`
+     - `double` → `MPI_DOUBLE`
+     - `char` → `MPI_CHAR`
+     - `long` → `MPI_LONG`
+     - `long long` → `MPI_LONG_LONG`
+     - `unsigned int` → `MPI_UNSIGNED`
+   - If a custom struct is sent, ensure a derived datatype is properly created and committed with `MPI_Type_commit` before use.
+
+7. **MPI_Status and MPI_Request errors:**
+   - `MPI_Recv` and `MPI_Probe` require a pointer to `MPI_Status` (or `MPI_STATUS_IGNORE`).
+   - `MPI_Wait` requires a pointer to `MPI_Request` and a pointer to `MPI_Status` (or `MPI_STATUS_IGNORE`).
+   - `MPI_Waitall` requires `MPI_Request array[]` and `MPI_Status array[]` (or `MPI_STATUSES_IGNORE`).
+   - Ensure `MPI_Request` arrays are large enough for all pending non-blocking operations.
+
+8. **MPI_Init and MPI_Finalize:**
+   - `MPI_Init(&argc, &argv)` must be called **before** any other MPI function.
+   - `MPI_Finalize()` must be called **after** all MPI communication is complete.
+   - No MPI calls are allowed after `MPI_Finalize()`.
+   - For programs that don't use `argc`/`argv`, `MPI_Init(NULL, NULL)` is valid.
+
+9. **Collective operation errors:**
+   - All processes in the communicator **must** call the same collective in the same order.
+   - `MPI_Scatter`: `sendcount` is the count **per process**, not total.
+   - `MPI_Gather`: `sendcount` is the count **per process**.
+   - `MPI_Bcast`: all processes pass the **same** `root` and `count`.
+   - `MPI_Reduce` / `MPI_Allreduce`: `sendbuf` and `recvbuf` must not overlap (unless using `MPI_IN_PLACE` on the root).
+   - `MPI_IN_PLACE` is only valid on the root rank for `MPI_Reduce` and `MPI_Gather`, or on all ranks for `MPI_Allreduce` and `MPI_Allgather`.
+
+10. **Derived datatype errors:**
+    - `MPI_Type_commit` must be called after creating a type and before using it in communication.
+    - `MPI_Type_vector(count, blocklength, stride, oldtype, &newtype)` — verify `stride` is in units of `oldtype` elements.
+    - `MPI_Type_create_struct` requires correct `array_of_displacements` computed via `MPI_Get_address` or `offsetof`.
+    - Ensure datatypes are freed with `MPI_Type_free` when no longer needed to prevent memory leaks.
+
+11. **Buffer and pointer errors:**
+    - Send/receive buffers must be valid pointers to allocated memory of sufficient size.
+    - Do **not** pass stack variables by value — pass their address (`&variable`).
+    - For `MPI_Scatter`/`MPI_Gather`, the send buffer on non-root ranks can be `NULL` if not used, but the **root** must have a valid buffer.
+
+12. **Communicator and rank errors:**
+    - Use `MPI_COMM_WORLD` unless a custom communicator was created.
+    - `MPI_Comm_rank` and `MPI_Comm_size` take a communicator and a pointer to `int`.
+    - Ranks are 0-indexed: valid ranks are `0` to `size - 1`.
+    - Sending to rank `size` or negative ranks (other than `MPI_ANY_SOURCE`) is invalid.
+
+13. **Tag and source matching:**
+    - Tags must be non-negative integers.
+    - `MPI_ANY_TAG` and `MPI_ANY_SOURCE` are valid only in receive operations.
+    - Ensure every `MPI_Send` has a corresponding `MPI_Recv` with matching tag and communicator to avoid deadlocks or unmatched messages.
+
+14. **Compilation and linkage:**
+    - The code must be compiled with an MPI compiler wrapper: `mpicc` for C, `mpicxx` / `mpic++` for C++.
+    - If using `mpicc`, ensure the code is valid C (not C++). If using `mpicxx`, ensure it is valid C++.
+    - If math functions are used, ensure `-lm` is linked.
+
+15. **Memory allocation for local data:**
+    - Each process must allocate its own local buffers. Do not assume shared memory.
+    - If the original code used a global array of size `N`, each process typically needs `local_n = N / nprocs` elements (plus remainder handling).
+    - `malloc` / `calloc` return values must be checked for `NULL`.
+
+16. **Preserve correct distributed timing:**
+    - If the program measures execution time, all ranks must synchronize with `MPI_Barrier(MPI_COMM_WORLD)` before the starting `MPI_Wtime()`.
+    - Ensure `elapsed_ms` and `max_elapsed_ms` are `double`, and that **all ranks** call this outside any rank-0 conditional and outside OpenMP regions:
+      `MPI_Reduce(&elapsed_ms, &max_elapsed_ms, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);`
+    - Only rank 0 may print the timing, using `max_elapsed_ms` rather than its local `elapsed_ms`. Fix or restore this invariant if necessary.
+
+**Current (broken) code:**

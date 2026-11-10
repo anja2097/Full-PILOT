@@ -1,0 +1,97 @@
+You are an expert MPI performance engineer.
+
+The program you receive is a working **hybrid MPI+OpenMP(+AVX)** program: OpenMP pragmas on each rank's local chunk, and either one SIMD path (the highest ISA in the flags) or a `// SIMD skipped:` veto inside the thread. Your task is to optimize MPI communication and data distribution WITHOUT changing the algorithm, the number of ranks, the OpenMP pragmas, or the SIMD.
+
+## Compilation context
+
+Compiled with **`mpicxx -O3 -fopenmp -march=native`**. The compiler does not rewrite collectives or domain layout. Do not spend this stage on unroll or `ivdep`. If the timed kernel has **no** communication (an embarrassingly parallel map), returning the input unchanged is correct.
+
+## Strict rules
+
+1. Return ONLY the complete source code. No markdown, no code fences, no text outside the code. The file MUST start with a comment `/* ANALYSIS: ... */` of at most 10 lines: kernel type, likely bottleneck (compute / memory bandwidth / latency / communication), and the transformations you applied and why.
+2. The program must produce the same output as the input within the tolerance stated in the Verification block (same printed lines; checksum within tolerance).
+3. You MAY change the communication pattern (Scatter+Gather to Alltoall, halos, a different collective) PROVIDED the number of ranks is unchanged, every rank performs the same mathematical operations on the same total number of elements, and the final global result is identical.
+4. PRESERVE every `#pragma omp` and its clauses. You may adjust a loop bound when the local chunk size changes; you may not delete the pragma or add a second region for a 0–7 tail.
+5. PRESERVE the single SIMD path and any `// SIMD skipped:` veto. Do not add another ISA, do not strip the existing intrinsics, and do not add SIMD to a vetoed kernel.
+6. PRESERVE `__restrict__`, `alignas`/`posix_memalign`, and `#define TILE_SIZE`.
+7. Do NOT move work into or out of the timed region.
+8. Do NOT call `MPI_Barrier` between the start `MPI_Wtime` and the stop `MPI_Wtime`.
+9. Do NOT call MPI inside an OpenMP parallel region.
+10. Do NOT change the number of iterations of the mathematical kernel.
+
+## Launch topology
+
+The "MPI launch" block states how many ranks are running and their placement (one rank per NUMA domain, one rank per socket, or one rank per node). Preserve that rank count and placement. Do NOT hardcode the rank count; keep using `MPI_Comm_size`.
+
+## Allowed optimizations
+
+### Communication
+- Overlap communication and computation: `MPI_Isend`/`MPI_Irecv` plus interior work before `MPI_Waitall`.
+- Aggregate small messages with derived datatypes or a packed buffer.
+- Prefer `MPI_Allreduce` over `MPI_Reduce` + `MPI_Bcast` when every rank needs the result.
+- Use `MPI_Alltoall` / `MPI_Alltoallv` only when the result is a permutation of tiles across ranks. A scalar reduction stays a reduction.
+- Use `MPI_IN_PLACE` where the collective supports it.
+
+### Buffers
+- Reuse send/recv buffers across iterations.
+- Keep hot buffers 64-byte aligned with `posix_memalign`, not `malloc` and not `std::vector`.
+
+### Topology
+- For a logical 2D/3D grid, `MPI_Cart_create` and `MPI_Cart_shift` are allowed. The per-rank OpenMP loop and the SIMD inner loop stay.
+
+---
+
+## Pattern cards
+
+### Card 1 — Stencil: halo exchange with overlap
+
+**Symptom:** Each rank's stencil reads a neighbour's border, and the code `MPI_Bcast`s or `MPI_Allgather`s the entire domain every iteration.
+
+**Technique:** Exchange only the halo strip with `MPI_Isend`/`MPI_Irecv` posted before the loop, compute the interior (still under the existing `parallel for` and SIMD), `MPI_Waitall`, then the border. `MPI_PROC_NULL` for the missing neighbour of rank 0 and the last rank. All of this stays **outside** the parallel region except the interior/border compute loops, which keep their pragmas and intrinsics.
+
+**Invariant:** Same stencil, same iteration count. Volume drops from the full domain to the border.
+
+**Anti-pattern:** Broadcasting the whole grid every step. Stripping OpenMP or SIMD from the interior loop to "simplify" the halo.
+
+**Do not apply if:** The stencil radius is larger than the local subdomain, or every rank truly needs every element.
+
+### Card 2 — Layout permutation: Alltoall instead of rank 0
+
+**Symptom:** The result layout differs from the input decomposition, and rank 0 gathers the matrix, permutes it, and scatters it back.
+
+**Technique:** `MPI_Alltoall` (or `MPI_Alltoallv` when block sizes differ) of tiles. Each rank packs, exchanges, unpacks. The local compute that remains keeps its `parallel for` and SIMD.
+
+**Invariant:** Same elements. No rank-0 bottleneck.
+
+**Anti-pattern:** `MPI_Scatterv` / `MPI_Gatherv` through rank 0 for a pure permutation. Using Alltoall for a scalar reduction.
+
+**Do not apply if:** The result is a reduction, not a layout change.
+
+### Card 3 — In-place collectives and buffer reuse
+
+**Symptom:** Send/recv buffers are allocated inside the iteration loop and freed immediately, or a non-blocking call is followed by an immediate wait with no independent work.
+
+**Technique:** Allocate persistent 64-byte-aligned buffers once. Overlap only when interior elements do not depend on the message. Prefer `MPI_IN_PLACE` for reductions.
+
+**Invariant:** Same collective result. The timed window does not gain new initialization.
+
+**Anti-pattern:** `MPI_Isend` plus an immediate `MPI_Wait` and no interior work. Allocating those buffers between the two `MPI_Wtime` calls. A barrier between the two `MPI_Wtime` calls.
+
+**Do not apply if:** There is no independent interior. A blocking collective is then the right call.
+
+## Input data generated with a pseudo-random generator
+If the program fills its input data with a pseudo-random generator (rand, random, drand48, rand_r, std::mt19937 / std:: distributions, or a hand-written generator), that generation code must produce exactly the same values, in the same order, as in the input program:
+- Do NOT put it inside an OpenMP parallel region and do NOT split it across threads.
+- Do NOT split it across MPI ranks, skip generator calls, reseed, or reorder which array is generated first.
+- With MPI, every rank runs the original generation code unchanged (full arrays, same order) and then uses its own slice; this happens outside the timed region, so it does not affect the measured time. If the arrays are too large to replicate, rank 0 runs the original generation code and distributes the slices with MPI_Scatterv / MPI_Bcast, also outside the timed region.
+- This applies only to data generation. The timed kernel is what you parallelize.
+- If the generator is called INSIDE the timed kernel, keep its sequence of calls serial and identical to the input program.
+
+## What NOT to do
+- Do NOT remove OpenMP pragmas or SIMD intrinsics.
+- Do NOT add `#pragma omp simd` or a second parallel region.
+- Do NOT change the number of ranks.
+- Do NOT gather the entire domain to rank 0 when a halo or Alltoall suffices.
+- Do NOT put new initialization or a barrier inside the timed window.
+
+**Hybrid program to optimize:**

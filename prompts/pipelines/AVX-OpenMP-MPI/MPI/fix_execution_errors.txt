@@ -1,0 +1,29 @@
+You are an expert C/C++ parallel programming engineer.
+
+The following HYBRID MPI+OpenMP(+AVX) program COMPILES but produces INCORRECT RESULTS at runtime compared to the original serial version.
+
+Fix the runtime correctness issue while preserving MPI, OpenMP, and the SIMD-or-veto decision.
+
+## Strict rules
+
+1. Return ONLY the corrected complete source code. No explanations, no markdown, no code fences.
+2. The fixed program must produce IDENTICAL output (same checksum, same stdout) as the original serial version.
+3. Preserve MPI domain decomposition, OpenMP thread parallelism, and existing SIMD branches.
+4. Preserve `// SIMD skipped:` kernels as scalar. Do not “fix” checksums by adding SIMD outside the timed region.
+5. Remove or narrow a SIMD or parallelism construct ONLY if it directly causes incorrect results.
+
+## Common causes of incorrect results in MPI+OpenMP+AVX code
+
+- **Global reduction not performed**: each MPI rank computes a partial result; `MPI_Reduce` or `MPI_Allreduce` must combine them on rank 0. If missing, rank 0 only has its local partial sum.
+- **`MPI_Gather` vs `MPI_Reduce`**: for scalar sums, use `MPI_Reduce(MPI_SUM)`; for array assembly, use `MPI_Gather`. Using the wrong one produces incomplete or corrupted results.
+- **Wrong local chunk boundaries**: `local_start = rank * (N / size)`; last rank must cover `local_end = N`. A fence-post error causes some elements to be skipped or double-counted.
+- **SIMD tail in local chunk**: the tail loop must run from `local_end - (local_n % VECTOR_WIDTH)` to `local_end`, not from `N - (N % VECTOR_WIDTH)` to `N`. After MPI decomposition, use local bounds.
+- **AVX-512 masked load with wrong mask for local tail**: if `local_n % 8 != 0`, the mask must be `(1 << (local_n % 8)) - 1`, not based on global N.
+- **Rank 0 not receiving all data**: if `MPI_Gather` receive count is `local_n` but some ranks have `local_n + 1` (remainder), the gather produces wrong results. Use `MPI_Gatherv` when ranks have unequal chunk sizes.
+- **OpenMP reduction clobbering MPI partial result**: if the OpenMP reduction inside the parallel region resets a shared accumulator, the MPI-level collection is corrupted. Use separate per-thread accumulators fed into a final scalar sum.
+- **`__restrict__` aliasing in MPI context**: if `MPI_Gather` writes into the same buffer that another pointer parameter aliases, remove `__restrict__` from those parameters.
+- **AVX reduction order sensitivity**: for a SIMD **timed** reduction, extract lanes and add in index order if the sum is order-sensitive. Checksum loops outside the timed region should remain scalar.
+- **Only rank 0 initializes data**: if input arrays are only initialized on rank 0 but other ranks need local data, use `MPI_Scatter` or `MPI_Bcast` before computation.
+- **Rank 0 reports only its local timing**: synchronize all ranks with `MPI_Barrier(MPI_COMM_WORLD)` before the starting `MPI_Wtime()`. Every rank must compute a `double elapsed_ms`, then all ranks must call, outside rank-0 conditionals and OpenMP regions:
+  `MPI_Reduce(&elapsed_ms, &max_elapsed_ms, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);`
+  Declare `double max_elapsed_ms = 0.0;` and make only rank 0 print it.

@@ -1,0 +1,58 @@
+You are an expert C/C++ and OpenMP programmer specializing in debugging and fixing compilation errors in parallel code.
+
+The code below was generated as a serial-to-OpenMP translation but it **fails to compile**. Your task is to fix ALL compilation errors so the code compiles and runs correctly.
+
+**STRICT RULES — follow them without exception:**
+
+1. The program must produce the same output as the input within the tolerance stated in the Verification block (same printed lines; checksum within tolerance).
+2. Fix **only** what is necessary to make the code compile correctly. Do **NOT** refactor, rename, restructure, or change logic unrelated to the errors.
+3. Return **ONLY** the corrected source code — no explanations, no markdown fences, no comments about what you changed.
+
+**DIAGNOSIS CHECKLIST — systematically check for and fix these common OpenMP compilation issues:**
+
+4. **Missing or incorrect headers:**
+   - Ensure `#include <omp.h>` is present.
+   - Ensure all standard library headers required by the code are included (`<stdio.h>`, `<stdlib.h>`, `<math.h>`, `<string.h>`, etc.).
+
+5. **`default(none)` violations:**
+   - If `default(none)` is used, **every** variable referenced inside the parallel region must be explicitly listed in a data-sharing clause (`shared`, `private`, `firstprivate`, `lastprivate`, `reduction`).
+   - Identify any variable that is used but not declared in any clause and add the correct clause for it.
+   - Pay special attention to: loop iterators, array names, struct members, global variables, constants, and function parameters.
+
+6. **Invalid variables in OpenMP clauses:**
+   - Only variables (not expressions, struct members, or array elements) can appear in `private`, `shared`, `firstprivate`, `reduction` clauses.
+   - If a struct member or array element is incorrectly placed in a clause, move the whole struct/array to `shared` and handle member access inside the region.
+
+7. **`reduction` clause errors:**
+   - The reduction variable must be a scalar or an array section (OpenMP 4.5+). It cannot be a struct member or pointer dereference.
+   - The operator must be valid for the variable type (`+`, `-`, `*`, `&`, `|`, `^`, `&&`, `||`, `min`, `max`).
+   - If the reduction pattern is too complex for a clause, replace it with `atomic` or `critical` as needed.
+
+8. **`collapse` clause errors:**
+   - All collapsed loops must be perfectly nested (no code between loop headers).
+   - All collapsed loop bounds must be computable before entering the loop nest.
+   - Loop iteration variables of collapsed loops must be integer types.
+   - If `collapse` is invalid, reduce the collapse depth or remove it.
+
+9. **Variable scoping and declaration issues:**
+   - In C89/C90 mode, variables cannot be declared inside `for` loop headers (`for(int i=0;...)`). Declare them before the pragma if the compiler requires it.
+   - Variables declared inside a parallel region are automatically private — do not also list them in a `private` clause.
+   - `const` and `constexpr` variables are predetermined `shared` by the OpenMP specification. They must NOT appear in any data-sharing clause (`shared`, `private`, `firstprivate`, etc.) — doing so causes a compilation error like `'N' is predetermined 'shared' for 'shared'`. Simply remove them from the clause; they are accessible inside the region without any annotation.
+   - `#define` macros are replaced by the preprocessor and never need data-sharing clauses.
+
+10. **OpenMP version compatibility:**
+    - Do not use features beyond what the target compiler supports (e.g., `simd` requires OpenMP 4.0+, `taskloop` requires OpenMP 4.5+, `reduction` on arrays requires OpenMP 4.5+).
+    - If an unsupported feature is causing the error, replace it with an equivalent construct from an earlier OpenMP version.
+
+11. **Type mismatches and casts:**
+    - Ensure loop iterator types match what OpenMP expects (signed/unsigned integer types).
+    - Ensure `atomic` operations are applied to supported types and operations.
+
+12. **Syntax errors in pragmas:**
+    - Verify correct comma/space placement in clauses.
+    - Verify matching parentheses in all clauses.
+    - Verify that `#pragma omp` directives are on a single logical line (use `\` for continuation if needed).
+    - Ensure no duplicate clauses that are mutually exclusive.
+
+
+**Current (broken) code:**

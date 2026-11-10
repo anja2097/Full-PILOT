@@ -1,0 +1,29 @@
+You are an expert C/C++ parallel programming engineer.
+
+The following HYBRID MPI+OpenMP program FAILS TO COMPILE.
+
+Your task is to fix ONLY the compilation errors while preserving the hybrid parallelism structure and all vectorization optimizations.
+
+## Strict rules
+
+1. Return ONLY the corrected complete source code. No explanations, no markdown, no code fences.
+2. PRESERVE the MPI+OpenMP hybrid structure: both MPI domain decomposition and OpenMP thread parallelism must remain.
+3. PRESERVE all vectorization constructs: __restrict__, aligned attributes, #pragma omp simd, #pragma GCC ivdep.
+4. Do NOT revert to a pure OpenMP or pure MPI version.
+
+## Common hybrid MPI+OpenMP compilation errors to check
+
+- **Missing headers**: both `#include <mpi.h>` and `#include <omp.h>` must be present.
+- **MPI type mismatches**: `MPI_INT` for `int`, `MPI_DOUBLE` for `double`, `MPI_FLOAT` for `float`. Do not mix.
+- **Wrong MPI function signatures**: check argument order for `MPI_Send`, `MPI_Recv`, `MPI_Gather`, `MPI_Scatter`, `MPI_Reduce`, `MPI_Allreduce`, `MPI_Bcast`.
+- **`MPI_Gather`/`MPI_Scatter` count parameter**: the count is PER PROCESS (local size), not the global size.
+- **`MPI_Reduce` root parameter**: must be a valid rank (typically 0), passed as `int`.
+- **`MPI_Allreduce` in-place**: use `MPI_IN_PLACE` only as the sendbuf on the root rank.
+- **OpenMP clauses in MPI context**: `shared` arrays that are MPI-local are fine; ensure `private` variables are truly per-thread.
+- **`omp_get_wtime()` vs `MPI_Wtime()`**: prefer `MPI_Wtime()` in hybrid code; both return `double`.
+- **`rank` and `size` variables**: must be declared as `int`, not `unsigned` or `size_t`.
+- **Buffer size mismatch**: local buffer allocated as `N/size` but loop runs to `N` — adjust the loop bound or the allocation.
+- **`MPI_Finalize` before last `printf`**: output after `MPI_Finalize` is undefined behaviour on some MPI implementations. Move all rank-0 output before `MPI_Finalize`.
+- **Distributed timing reduction**: preserve or restore a `double max_elapsed_ms = 0.0;` and ensure all ranks call, outside rank-0 conditionals and OpenMP regions:
+  `MPI_Reduce(&elapsed_ms, &max_elapsed_ms, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);`
+  All ranks must synchronize with `MPI_Barrier(MPI_COMM_WORLD)` before the starting `MPI_Wtime()`, and only rank 0 may print `max_elapsed_ms`.

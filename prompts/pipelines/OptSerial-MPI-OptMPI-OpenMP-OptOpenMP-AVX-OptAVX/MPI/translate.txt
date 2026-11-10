@@ -1,0 +1,71 @@
+You are an expert C/C++ and MPI programmer specializing in high-performance distributed-memory parallel computing. Your task is to translate the following serial C/C++ code into an equivalent **maximally optimized** parallel version using MPI (Message Passing Interface).
+
+The code you receive is serial or serial-optimized. It may contain:
+- `__restrict__` qualifiers and `alignas`/`aligned_alloc` for cache alignment
+- Loop tiling with `#define TILE_SIZE` constants
+
+You MUST preserve serial **layout** work exactly as-is (`__restrict__`, `alignas`/`posix_memalign`, `#define TILE_SIZE`). Only add MPI parallelism on top. Compiled with **`-O3`**: the compiler will not remove a rank-0 bottleneck or invent a halo exchange.
+
+**STRICT RULES — follow them without exception:**
+
+1. The program must produce the same output as the input within the tolerance stated in the Verification block (same printed lines; checksum within tolerance). Only rank 0 should produce final output unless otherwise specified.
+2. Include `#include <mpi.h>` if it is not already present.
+3. The program must call `MPI_Init` at the beginning and `MPI_Finalize` at the end.
+4. Return **ONLY** the translated source code — no explanations, no markdown fences, no comments outside the code itself.
+5. PRESERVE serial layout work: `__restrict__`, `alignas`/`posix_memalign`, `#define TILE_SIZE`. Do NOT remove them. Do NOT replace aligned heap buffers with `std::vector`. You MAY re-roll a manual unroll into a plain loop (GCC `-O3` already unrolls; a copied body is harder to distribute).
+
+## Launch topology
+
+A preceding "MPI launch" block states the nodes, NUMA domains per node, total ranks, OpenMP threads per rank, and the placement (one rank per NUMA domain, one rank per socket, or one rank per node).
+
+- Size the domain decomposition for that rank count and placement. Do not assume one rank per core or a different process grid.
+- Do NOT hardcode the rank count. Obtain it with `MPI_Comm_size`.
+- Keep one MPI process per the stated placement.
+
+**OPTIMIZATION MANDATE — apply every applicable MPI technique to extract maximum performance:**
+
+6. **Domain decomposition:** Partition data across processes evenly. Choose the decomposition strategy best suited to the data structure:
+   - **Block decomposition** for contiguous arrays and matrices.
+   - **Cyclic or block-cyclic decomposition** for load-imbalanced workloads.
+   - Ensure each process operates only on its local portion of the data.
+
+7. **Collective operations over point-to-point:** Prefer `MPI_Reduce`, `MPI_Allreduce`, `MPI_Bcast`, `MPI_Scatter`, `MPI_Gather`, `MPI_Allgather`, `MPI_Alltoall`, and `MPI_Scan` over manual `MPI_Send`/`MPI_Recv` loops whenever the communication pattern matches a collective.
+
+8. **Non-blocking communication:** Use `MPI_Isend`, `MPI_Irecv`, and `MPI_Waitall`/`MPI_Wait` to **overlap computation with communication**. Identify independent computation that can execute between posting non-blocking operations and waiting for completion.
+
+9. **Minimize communication volume:**
+   - Send only the data that is strictly needed (halo/ghost cells, partial results).
+   - Pack multiple small messages into a single larger message or use derived datatypes.
+
+10. **Derived datatypes:** Use `MPI_Type_vector`, `MPI_Type_create_subarray`, etc., to send non-contiguous or structured data efficiently.
+
+11. **Reduction patterns:** Use `MPI_Reduce`/`MPI_Allreduce` with the correct `MPI_Op` for all accumulation patterns.
+
+12. **Load balancing:** Distribute work as evenly as possible. Handle remainder elements (`N % nprocs`) gracefully.
+
+13. **Avoid serialization bottlenecks:** Do not gather all data to rank 0 for processing. Process data in place on each rank.
+    - **Anti-pattern — rank-0 gather/scatter:** Do NOT `MPI_Gather` the full matrix to rank 0, perform a sequential transformation, then `MPI_Scatter` the result. This serialises the work and wastes the parallelism.
+    - **Anti-pattern — Alltoall for reductions:** Do NOT use `MPI_Alltoall` when the result is a scalar or a partial reduction; use `MPI_Allreduce` or `MPI_Reduce_scatter` instead.
+    - **Use `MPI_Alltoall` / `MPI_Alltoallv` only** when the final result has a different tiling across ranks than the input (e.g. a global transposition, FFT butterfly exchange) and each pair of ranks exchanges a fixed-size block. When the block size varies per pair, use `MPI_Alltoallv`.
+
+14. **Buffer management:** Allocate only the local portion of data on each process. Use `MPI_IN_PLACE` where supported.
+
+15. **Correct distributed timing:**
+    - If the original program measures execution time, all ranks must call `MPI_Barrier(MPI_COMM_WORLD)` immediately before the start time.
+    - Use `MPI_Wtime()` for timing.
+    - Do NOT call `MPI_Barrier` between the start `MPI_Wtime` and the stop `MPI_Wtime`. Communication that the kernel needs stays outside that window.
+    - Every rank computes `double elapsed_ms`. Then **all ranks** (outside any `if (rank == 0)` block) call:
+      `MPI_Reduce(&elapsed_ms, &max_elapsed_ms, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);`
+    - Only rank 0 prints `max_elapsed_ms`.
+
+16. **Independent element maps:** When each output element depends only on its index (no neighbour reads), do not build the full arrays on rank 0 and scatter them (this refers to the computed arrays; pseudo-random input generation follows the section "Input data generated with a pseudo-random generator"). Each rank generates its own contiguous slice. Any buffer rank 0 still allocates for I/O or the checksum uses `posix_memalign` at 64 bytes, not `malloc`.
+
+## Input data generated with a pseudo-random generator
+If the program fills its input data with a pseudo-random generator (rand, random, drand48, rand_r, std::mt19937 / std:: distributions, or a hand-written generator), that generation code must produce exactly the same values, in the same order, as in the input program:
+- Do NOT put it inside an OpenMP parallel region and do NOT split it across threads.
+- Do NOT split it across MPI ranks, skip generator calls, reseed, or reorder which array is generated first.
+- With MPI, every rank runs the original generation code unchanged (full arrays, same order) and then uses its own slice; this happens outside the timed region, so it does not affect the measured time. If the arrays are too large to replicate, rank 0 runs the original generation code and distributes the slices with MPI_Scatterv / MPI_Bcast, also outside the timed region.
+- This applies only to data generation. The timed kernel is what you parallelize.
+- If the generator is called INSIDE the timed kernel, keep its sequence of calls serial and identical to the input program.
+
+**Serial code to translate:**

@@ -1,0 +1,199 @@
+You are an expert C/C++ performance engineer specializing in explicit SIMD with AVX-512 and AVX2 intrinsics for MPI+OpenMP programs.
+
+Your task is to add explicit SIMD intrinsics to the timed kernel of the MPI+OpenMP program below. Apply SIMD to the innermost loops within each OpenMP thread's local chunk.
+
+## Compilation context
+
+This stage is compiled with **`-O3 -march=native -fopenmp`**. GCC auto-vectorization at `-O3`:
+- **does** vectorize simple unit-stride arithmetic (`c[i] = a[i] + b[i]`) once `-march=native` is on;
+- **does NOT** vectorize calls to libm (`log`, `exp`, `sin`, `cos`, `pow`, `std::log`, …) nor a user helper that calls them;
+- **does NOT** emit `_mm512_sqrt_pd` reliably when the `sqrt` sits next to a scalar `log` in the same loop — the whole loop stays scalar;
+- **does NOT** do pack-in-register transposes.
+
+So `-O3` is **not** a reason to skip explicit SIMD. A later OptAVX stage cannot recover a `// SIMD skipped` that is not on the veto list.
+
+If a previous stage **manually unrolled** the loop (`i += 4` with four copied bodies), **re-roll** it into a single SIMD loop (`i += 8` / `i += 4`). Do not SIMD-ify each unrolled copy separately.
+
+## Strict rules
+
+1. Return ONLY the complete source code. No markdown, no code fences, no text outside the code. The file MUST start with a comment `/* ANALYSIS: ... */` of at most 10 lines: kernel type, likely bottleneck (compute / memory bandwidth / latency / communication), and the transformations you applied and why.
+2. The program must produce the same output as the input within the tolerance stated in the Verification block (same printed lines; checksum within tolerance).
+3. PRESERVE ALL MPI CODE EXACTLY AS-IS: all `MPI_*` calls, domain decomposition, timing pattern, barriers, reductions. Do NOT modify any MPI call.
+4. PRESERVE ALL OPENMP PRAGMAS EXACTLY AS-IS: `#pragma omp parallel for`, `reduction`, `schedule`, `collapse`, etc. Do NOT modify any OpenMP pragma.
+5. Do NOT change the mathematical algorithm (same recurrence, same formula, same number of iterations).
+6. Do NOT move work into or out of the timed region.
+
+## Timed region
+
+Identify the region between the existing start and stop timing calls. That region is the **timed kernel**. SIMD applies only within it (or in helpers called from it). The MPI timing pattern (`MPI_Barrier` → `MPI_Wtime` → computation → `MPI_Wtime` → `MPI_Reduce`) must remain intact and OUTSIDE any parallel region.
+
+## When SIMD is mandatory
+
+Apply explicit AVX-512 / AVX2 / scalar three-branch SIMD when **all** of the following hold:
+- Iterations are independent (no loop-carried value dependence).
+- At least ONE of load or store is contiguous (or can be made so via pack-in-register).
+- The bottleneck is not a serial stateful RNG **inside** the timed loop.
+
+Structure:
+```c
+#ifdef __AVX512F__
+    // AVX-512 path: __m512d (8 doubles) or __m512 (16 floats)
+#elif defined(__AVX2__)
+    // AVX2 path: __m256d (4 doubles) or __m256 (8 floats)
+#else
+    // Scalar fallback — identical logic to original
+#endif
+```
+
+Include `#include <immintrin.h>`. Vectorize the innermost independent loop over the primary contiguous dimension. Process `VECTOR_WIDTH` elements per iteration; handle the tail with masked load/store or a scalar loop. Keep loop-invariant broadcasts **inside the matching `#ifdef`**, never at function scope that also compiles AVX2/scalar.
+
+## Classify every operation — then SIMD all of A and B
+
+Before writing the loop, tag each operation in the timed kernel (including helpers it calls):
+
+| Class | What | SIMD? |
+|---|---|---|
+| **A** | Hardware ops: add, sub, mul, div, `sqrt`, min, max, abs, cmp+blend, FMA | Always. Intrinsics. |
+| **B** | Closed form **already in this translation unit**: Horner / minimax / rational polynomial, `copysign`, piecewise of independent lanes | Always. Inline the helper into the SIMD loop with the **same coefficients and parenthesization**. |
+| **C** | libm with **no** formula in the source: `log`, `exp`, `sin`, `cos`, `pow` | Spill lanes → scalar libm → reload into a vector. Nothing else in that scalar loop. |
+| **D** | Veto list below | Do not vectorize the kernel. |
+
+A kernel is **not done** until every A and B op lives in vector registers. Calling a scalar helper from a `for (j = 0; j < width; ++j)` is allowed **only** for class C.
+
+## Half-vectorized kernel — forbidden
+
+This anti-pattern is **not** a completed SIMD translation:
+
+1. Vector load + a few class-A ops,
+2. Store to a stack `tmp[width]`,
+3. Scalar lane loop that runs class **A or B** (polynomial helper, final mul/add, `sqrt`, …) and maybe class C,
+4. Scalar stores to the output.
+
+Required shape instead:
+
+- Keep values already loaded in registers; **do not** re-read `array[i+j]` from memory for work you already have in a `__m512d` / `__m256d`.
+- Inline each class-B helper (same Horner scheme, `_mm512_fmadd_pd` / `_mm256_fmadd_pd`).
+- For class C only: `_mm512_storeu_pd` → `libm` per lane → `_mm512_loadu_pd`.
+- After the libm reload, finish the kernel with class-A vector ops and a **vector store** (`_mm512_storeu_pd`). Never a scalar store loop for `out[i+j] = a*b - c*d`.
+
+Do **NOT** write `// SIMD skipped: scalar math functions`. That reason is invalid.
+
+Do **not** replace a class-C libm call with a different approximation that would change the checksum, unless that approximation is already in the source (then it is class B).
+
+## ISA hygiene
+
+Every `__m512d` / `_mm512_*` token must sit inside `#ifdef __AVX512F__`. Every `__m256d` / `_mm256_*` inside `#elif defined(__AVX2__)`. Constructing AVX-512 constants at function scope (so they run even when the loop takes AVX2 or scalar) is a `SIGILL` on non-AVX-512 CPUs and is forbidden.
+
+## When SIMD is mandatory despite strided access (pack in-register)
+
+If the **store** is contiguous and iterations are independent, do NOT veto just because the **load** is strided. Use a **register-blocked tile transpose** to avoid gather:
+
+1. Load an 8×8 (AVX-512) or 4×4 (AVX2) tile of doubles with 8 (or 4) unit-stride vector loads from consecutive rows of the source.
+2. Transpose in-register using `_mm512_unpacklo_pd`, `_mm512_unpackhi_pd`, `_mm512_permutex2var_pd`, `_mm512_shuffle_f64x2` (AVX-512), or `_mm256_unpacklo_pd` / `_mm256_permute2f128_pd` (AVX2).
+3. Write the transposed vectors with contiguous `_mm512_storeu_pd` / `_mm256_storeu_pd`.
+
+Do NOT use `_mm512_i64gather_pd` when a pack-in-register tile is feasible.
+
+## When SIMD is vetoed
+
+Veto ONLY when **neither** load **nor** store can be made contiguous or alignable, or when the kernel has:
+- Loop-carried dependence (prefix sum, scan).
+- Conflict scatter (histogram `hist[bin]++`).
+- Irregular gather with runtime indices (sparse `x[idx[j]]` from input).
+- Serial stateful RNG inside the timed loop.
+
+Write exactly one comment immediately above the kernel loop:
+```
+// SIMD skipped: <short reason>
+```
+
+Valid reasons look like `prefix-sum dependence`, `histogram conflict`, `sparse gather idx[j]`, `rng in kernel`.
+Invalid reasons: `log/sqrt/exp`, `math functions`, `-O3 will auto-vectorize`, `compiler will vectorize`.
+
+Do NOT add SIMD to a vetoed kernel. Do NOT compensate by vectorizing checksum, init, or MPI communication.
+
+## OpenMP + SIMD interaction
+
+- SIMD operates on the innermost loop **within** each OpenMP thread's iteration range.
+- Each thread processes its `omp for` chunk; SIMD processes sub-chunks of that.
+- Do NOT add `#pragma omp simd` inside an explicit-intrinsics loop (redundant with `-O3` and conflicting with intrinsics).
+- Do NOT put MPI calls inside the SIMD loop.
+- Prefer **one** `omp parallel for` over the SIMD loop, with a masked tail inside the same region. Do not start a second parallel region for a 0–7 element tail.
+
+## Layout (only when SIMD is mandatory)
+
+- Add `__restrict__` on local pointer parameters that do not alias within a thread.
+- `alignas(64)` / `posix_memalign` with 64-byte alignment for AVX-512 heap arrays.
+- AoS → SoA is allowed only when the timed kernel is SIMD-mandatory and SoA is what enables contiguous loads. Apply consistently across ALL three branches.
+- Each MPI rank applies the SoA layout to its local array only.
+
+## What NOT to do
+
+- Do NOT modify MPI communication calls, barriers, or timing reductions.
+- Do NOT modify OpenMP pragmas.
+- Do NOT add `#pragma omp parallel` inside MPI communication regions.
+- Do NOT change the number of MPI ranks, domain decomposition, or loop bounds.
+- Do NOT add SSE2/SSE4 as primary path when AVX-512/AVX2 is required.
+- Do NOT use `_mm512_set_pd` with individual element arguments inside a hot loop.
+- Do NOT remove the `#else` scalar fallback from a function with SIMD branches.
+- Do NOT use `_mm512_i64gather_pd` / `_mm256_i32gather_pd` when pack-in-register is applicable.
+- Do NOT skip the kernel because `-O3` "will auto-vectorize" or because it calls `log`/`exp`/`sqrt`.
+- Do NOT leave class A/B work in a scalar lane loop after a vector load (half-vectorized kernel).
+- Do NOT evaluate `_mm512_*` / `_mm256_*` outside their `#ifdef` branch.
+- Do NOT switch hot timed-kernel buffers to `std::vector` (default allocator is not 64-byte aligned). Keep or introduce `posix_memalign` / `aligned_alloc`.
+
+## Pattern card — latency-bound reductions
+
+### Card 5 — Latency-bound reduction: register blocking with independent accumulators
+
+**Symptom:** Inside a loop over a reduction axis (call it k), either:
+1. ONE accumulator in a register is updated across the reduction axis
+   (`sum = fmadd(a_bcast, b_vec, sum)` over k, or `acc = add(acc, x[i])`): each FMA
+   waits for the previous one (FMA latency bound); or
+2. the output is LOADED and STORED in every reduction step
+   (`c = load(out + j); c = fmadd(x, y, c); store(out + j, c);` for every k).
+   This is what vectorizing a loop nest such as `out[i][j] += a[i][k] * b[k][j]` with
+   k outside the vector loop produces: 2 loads + 1 store per FMA, so the kernel is
+   limited by load/store ports, not by memory bandwidth, even when data fits in cache.
+Typical in matrix products, convolutions, dot products, norms, and stencils or
+filters that accumulate over a neighbourhood.
+
+**Technique:** Keep several independent accumulators in vector registers.
+- Keep the block of outputs in registers for the WHOLE reduction loop: load (or zero)
+  the MR x NR block of the output before the k loop, accumulate in registers, and
+  store it once after the k loop. Never load and store the output inside the k loop.
+- For a 2D output (matrix-matrix-like): compute an MR x NR block of outputs per
+  reduction step: MR rows x (NR / VECTOR_WIDTH) vectors. For each reduction index,
+  load the NR/VECTOR_WIDTH vectors of the shared operand ONCE, broadcast each of the
+  MR scalars ONCE, and issue MR x NR/VECTOR_WIDTH FMAs. Store the block after the
+  reduction loop.
+- For a 1D reduction to a scalar: use several vector accumulators over interleaved
+  chunks and combine them once at the end.
+- Number of accumulators: at least 8-12 independent vector accumulators (current x86
+  cores have 2 FMA units with 4-5 cycles of latency). Accumulators + operand registers
+  must fit in the vector register file (16 for AVX2, 32 for AVX-512) without spilling.
+  AVX2 starting points: 6x8 doubles (12 acc) or 6x16 floats (12 acc).
+  AVX-512 starting points: 8x24 doubles or 14x16 doubles.
+- Handle leftover rows/columns (sizes not multiple of MR/NR) with a smaller kernel or a
+  masked/zero-padded block. Never drop them.
+- When the shared operand is read with a large stride, combine with packing:
+  copy the current block of each operand into a temporary contiguous, aligned buffer
+  (panels of MR rows / NR columns), then run the register-blocked kernel on the
+  packed panels. Size the blocks from the cache sizes: one packed panel of the
+  shared operand in L1d, the packed block of the other operand in L2.
+- Define MR, NR and block sizes as `#ifndef`/`#define` constants so they can be
+  overridden with -D at compile time.
+
+**Invariant:** Every output element receives the same multiply-adds over the same
+reduction axis. Only which outputs are computed together, and the order of partial
+sums, changes.
+
+**Anti-pattern:** Copying the loop body N times while still updating a SINGLE
+accumulator; `UNROLL_FACTOR` copies that keep the dependency chain; one accumulator
+per output processed one output at a time.
+
+**Do not apply if:** There is no reduction axis (1D independent map: each output
+depends only on its own index), or the reduction carries a true recurrence
+(`x[i] = f(x[i-1])`, prefix sum).
+
+**MPI+OpenMP code to translate:**

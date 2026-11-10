@@ -1,0 +1,64 @@
+You are an expert C/C++ and OpenMP programmer specializing in debugging runtime errors and incorrect results in parallel code.
+
+The code below was generated as a serial-to-OpenMP translation. It **compiles successfully** but produces incorrect results at runtime (wrong checksum, segmentation fault, core dump, or other runtime failure). Your task is to fix ALL runtime errors so the program executes correctly and produces results identical to the serial version.
+
+**STRICT RULES — follow them without exception:**
+
+1. The observable behavior of the program **MUST** become identical to the original serial version (same output, same checksum, same results).
+2. Fix **only** what is necessary to correct the runtime behavior. Do **NOT** refactor, rename, restructure, or change logic unrelated to the errors.
+3. Return **ONLY** the corrected source code — no explanations, no markdown fences, no comments about what you changed.
+
+**DIAGNOSIS CHECKLIST — systematically check for and fix these common OpenMP runtime issues:**
+
+4. **Data races (most common cause of wrong results):**
+   - Any variable written by multiple threads without synchronization is a data race.
+   - Loop variables used as array indices must be `private` or declared inside the parallel region.
+   - Accumulators (sums, min, max) updated in parallel must use `reduction(op:var)`.
+   - Shared output arrays written at overlapping indices require `atomic` or `critical`.
+   - If `default(none)` is missing, assume all variables are shared and audit each one.
+
+5. **Segmentation fault / invalid memory access:**
+   - A private pointer that was initialized in serial code may be uninitialized in each thread — use `firstprivate` or re-initialize inside the parallel region.
+   - Accessing array elements with an index derived from a shared (non-private) variable that is concurrently modified causes out-of-bounds access.
+   - Stack overflow: large arrays declared `private` inside `#pragma omp parallel` live on each thread's stack. Move them to heap or use `shared` with proper synchronization.
+   - Pointer aliasing: if two `shared` pointers may alias, ensure writes to one do not invalidate reads of the other in the same parallel region.
+
+6. **Incorrect reduction:**
+   - Reduction variables must be scalar. If the result is accumulated into a struct field or array element, replace with a local scalar reduced at the end.
+   - Ensure the initial value of the reduction variable before the parallel region is correct (0 for `+`, 1 for `*`, INT_MAX/DBL_MAX for `min`, INT_MIN/DBL_MIN for `max`).
+   - `reduction(+:arr[0:N])` (array reduction, OpenMP 4.5+) requires all elements to be properly initialized before the region.
+
+7. **Race on loop bounds or shared index variables:**
+   - If a loop's upper bound (`N`, `size`, etc.) is a shared variable that could be modified inside the loop body by another thread, cache it in a `firstprivate` copy.
+   - Ensure loop induction variables are always `private` (they are by default for `for` constructs, but verify if the variable is also used outside).
+
+8. **`ordered` / `schedule` issues causing wrong results:**
+   - `schedule(dynamic)` or `schedule(guided)` can cause iterations to execute in non-deterministic order. If the algorithm requires ordered accumulation (e.g., prefix sum), use `ordered` or restructure.
+   - `collapse(N)` flattens the iteration space: verify that the collapsed loops are truly independent and that no shared state is updated based on the combined index.
+
+9. **`critical` / `atomic` misuse:**
+   - `#pragma omp atomic` supports only simple scalar operations (`x op= expr`, `x++`, etc.). Complex expressions or struct updates require `#pragma omp critical`.
+   - Two `atomic` writes to different variables are NOT synchronized with each other. If multiple variables must be updated atomically together, use `critical`.
+   - A `critical` section with an explicit name is separate from the unnamed critical section — ensure the correct name (or no name) is used consistently.
+
+10. **Thread-unsafe library calls:**
+    - `rand()`, `strtok()`, `localtime()`, and other POSIX functions with static internal state are not thread-safe. Use re-entrant versions (`rand_r()`, `strtok_r()`, etc.) or protect with `critical`.
+    - `malloc`/`free` are generally thread-safe in glibc but may cause contention. If performance is critical and correctness issues arise, use thread-local allocators.
+
+11. **`threadprivate` and global variables:**
+    - Global variables declared `threadprivate` are NOT initialized per thread by default. Use `copyin` in the `parallel` directive to copy the master thread's value to all threads.
+    - A `threadprivate` variable's value persists across parallel regions for the same thread — this can cause stale data bugs if not reset.
+
+12. **`nowait` misuse:**
+    - `#pragma omp for nowait` removes the implicit barrier at the end of the loop. If subsequent code depends on the loop's output, the barrier is essential — remove `nowait`.
+    - Similarly, `#pragma omp single nowait` allows other threads to proceed before the single section completes.
+
+13. **Memory model / flush issues:**
+    - OpenMP does not guarantee that writes by one thread are immediately visible to others without a `flush`. At barriers (end of `parallel`, end of `for`, `barrier` directive) a flush is implicit. For fine-grained synchronization without a barrier, add `#pragma omp flush(var)` after writes and before reads.
+
+14. **False sharing (incorrect results unlikely but verify):**
+    - Adjacent array elements updated by different threads may reside in the same cache line, causing performance degradation but not correctness issues — unless padding changes alignment assumptions.
+
+**Current code:**
+
+**Execution error details:**

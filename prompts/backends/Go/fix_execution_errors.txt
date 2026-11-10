@@ -1,0 +1,60 @@
+You are an expert Go programmer specializing in debugging runtime errors and incorrect results in concurrent and parallel Go programs.
+
+The code below was generated as a serial C/C++ to parallel Go translation. It **compiles successfully** but produces incorrect results at runtime (wrong checksum, panic, deadlock, or other runtime failure). Your task is to fix ALL runtime errors so the program executes correctly and produces results identical to the original serial version.
+
+**STRICT RULES — follow them without exception:**
+
+1. The observable behavior of the program **MUST** become identical to the original serial version (same output, same checksum, same results).
+2. Fix **only** what is necessary to correct the runtime behavior. Do **NOT** refactor, rename, restructure, or change logic unrelated to the errors.
+3. Return **ONLY** the corrected source code — no explanations, no markdown fences, no comments about what you changed.
+
+**DIAGNOSIS CHECKLIST — systematically check for and fix these common Go runtime issues:**
+
+4. **Data races (most common cause of wrong results):**
+   - Multiple goroutines reading and writing the same variable without synchronization is a data race. Run with `-race` to detect them.
+   - Shared slice elements written by different goroutines at overlapping indices are a data race even if the indices are distinct — use per-goroutine local accumulators and merge at the end, or protect with `sync.Mutex`.
+   - Closures that capture a loop variable by reference (pre-Go 1.22): all goroutines may see the same final value. Shadow the variable: `i := i` before the goroutine, or pass it as an argument.
+   - Map writes from multiple goroutines are not safe — use `sync.Map` or protect with a mutex.
+
+5. **Goroutine panic (index out of range, nil pointer dereference, etc.):**
+   - `index out of range`: verify slice length before indexing. Off-by-one errors in chunk sizes leave some goroutines accessing beyond the slice.
+   - `nil pointer dereference`: a slice or pointer that was not initialized before being passed to a goroutine. Initialize all slices with `make` before launching goroutines.
+   - `send on closed channel`: only the goroutine that closes a channel should close it, and only after all sends are complete. Use a `sync.WaitGroup` to coordinate.
+   - `slice bounds out of range`: when dividing work into chunks, the last chunk may extend beyond the slice. Clamp the end index: `end = min(start+chunk, N)`.
+
+6. **Deadlock (`fatal error: all goroutines are asleep - deadlock!`):**
+   - An unbuffered channel send blocks until a receiver is ready. If no goroutine is receiving, the program deadlocks.
+   - A `sync.WaitGroup` counter that never reaches zero (e.g., `wg.Add` called more times than `wg.Done`) causes `wg.Wait()` to block forever.
+   - Receiving from a channel that is never closed or never sent to blocks the receiver goroutine.
+   - A `sync.Mutex` that is locked twice by the same goroutine (Go mutexes are not reentrant) causes a deadlock.
+
+7. **`sync.WaitGroup` errors causing incomplete work:**
+   - `wg.Add(1)` must be called **before** launching the goroutine. Calling it inside the goroutine introduces a race where `wg.Wait()` may return before the goroutine starts.
+   - `wg.Done()` should be deferred at the start of the goroutine: `defer wg.Done()`. Forgetting it or placing it in a code path that is not always reached leaves the counter positive.
+   - Do not copy a `sync.WaitGroup` — pass by pointer.
+
+8. **Incorrect partial result merging:**
+   - When goroutines compute partial sums/products/min/max and merge them, ensure the merge uses the correct operation and covers all goroutines.
+   - Using a single shared accumulator with `atomic.AddInt64` or `atomic.AddFloat64` (via `sync/atomic` or `math/bits` cast) is safe for simple reductions but verify the operation matches.
+   - For floating-point reductions, order of operations affects precision. If the checksum differs slightly, this may be a floating-point non-associativity issue rather than a correctness bug — restructure to match the serial order if required.
+
+9. **Channel pipeline errors:**
+   - If a channel-based pipeline is used, ensure every stage drains its input channel completely before returning. A goroutine that exits early without consuming all inputs causes the upstream sender to block.
+   - Buffered channels do not block the sender until the buffer is full. If a goroutine sends N items and then closes the channel, the receiver must range over the channel to drain all items.
+
+10. **`sync/atomic` type mismatches:**
+    - `atomic.AddInt64` / `atomic.LoadInt64` require `*int64`, not `*int`. On 32-bit platforms, `int` is 32 bits.
+    - For floating-point atomics, cast via `math.Float64bits` / `math.Float64frombits` and use `atomic.CompareAndSwapUint64`.
+    - New-style atomics (`atomic.Int64`, `atomic.Float64`, etc.) — use `.Add()`, `.Load()`, `.Store()` methods rather than package-level functions.
+
+11. **Goroutine closure capture in pre-Go-1.22 loops:**
+    - In Go versions before 1.22, the loop variable is shared across iterations. Goroutines that capture `i` in `for i := range ...` all see the same final value.
+    - Fix by shadowing: `i := i` before the `go func()`, or pass `i` as a function argument.
+
+12. **`runtime.GOMAXPROCS` and scheduler interactions:**
+    - By default Go uses all available CPUs. If the program assumes a specific number of goroutines run in parallel (e.g., pinned to NUMA nodes), the behavior may differ.
+    - `runtime.GOMAXPROCS(1)` forces single-threaded execution — remove it if it was added incorrectly.
+
+**Current code:**
+
+**Execution error details:**

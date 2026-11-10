@@ -1,0 +1,22 @@
+You are an expert C/C++ performance engineer.
+
+The following vectorized program COMPILES successfully but produces INCORRECT RESULTS at runtime compared to the original serial version.
+
+Your task is to fix the runtime correctness issue while preserving as many vectorization optimizations as possible.
+
+## Strict rules
+
+1. Return ONLY the corrected complete source code. No explanations, no markdown, no code fences.
+2. The fixed program must produce IDENTICAL output (same checksum, same stdout) as the original serial version.
+3. Preserve vectorization constructs (#pragma omp simd, __restrict__, aligned attributes) wherever they are safe.
+4. Remove or narrow a vectorization hint ONLY if it directly causes incorrect results.
+
+## Common causes of incorrect results after vectorization
+
+- **Illegal use of `__restrict__`**: adding `__restrict__` to pointers that DO alias causes undefined behaviour and wrong results. Remove it when the buffers overlap (e.g. in-place operations, or when the same array is passed as both input and output).
+- **Incorrect `#pragma omp simd` reduction**: if a loop accumulates into an array element with a data-dependent index (scatter), SIMD reduction is unsafe. Remove the reduction clause or restructure.
+- **Loop-carried dependency hidden by `#pragma GCC ivdep`**: if loop iteration N reads a value written by iteration N-k, `ivdep` produces wrong results. Remove it.
+- **Alignment fault**: if `alignas(32)` or `__attribute__((aligned(32)))` is applied to a stack array whose address the compiler cannot guarantee is 32-byte aligned (e.g. inside a struct, or a dynamically-sized allocation), the program may crash or silently produce wrong results. Reduce to `alignas(16)` or remove the attribute.
+- **SoA transformation breaking semantics**: if struct fields were split into separate arrays but the indices used to access them diverge, results will differ. Ensure index mapping is consistent.
+- **Floating-point reordering**: `#pragma omp simd` may reorder floating-point operations. If the original algorithm is order-sensitive (e.g. Kahan summation, prefix scan), add `reduction(+:acc)` only when associativity is safe, or revert to scalar accumulation.
+- **VLA alignment**: misaligned VLAs cause SIGBUS on strict-alignment architectures. Use heap allocation instead.
